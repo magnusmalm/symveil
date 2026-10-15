@@ -16,7 +16,8 @@ pub const PRI_SECRET: u8 = 3;
 pub enum Boundary {
     /// ASCII identifier characters (`[A-Za-z0-9_]`) end the match.
     Ident,
-    /// Digits and dots end the match, so a longer dotted quad is not cut short.
+    /// Digits, and a dot that starts another octet, end the match.
+    /// A sentence period after a complete address does not.
     Ip,
     /// The match is taken as the masker reported it.
     None,
