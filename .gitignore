@@ -1,0 +1,4 @@
+/target
+**/.symveil/
+demo/*.mp4
+demo/*.gif

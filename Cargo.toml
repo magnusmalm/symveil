@@ -1,0 +1,33 @@
+[workspace]
+members = [".", "crates/symveil-core"]
+resolver = "2"
+
+[package]
+name = "symveil"
+version = "0.1.0"
+edition = "2021"
+description = "Local secret-masking proxy between coding agents and cloud LLMs"
+publish = false
+license = "Apache-2.0"
+
+# src/plugins.rs and src/main.rs keep an inert `cfg(feature = "identifiers")`
+# hook. This tree does not declare that feature, so check-cfg stays quiet.
+[lints.rust]
+unexpected_cfgs = "allow"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+symveil-core = { path = "crates/symveil-core" }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+async-stream = "0.3"
+axum = "0.7"
+bytes = "1"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls", "stream"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
