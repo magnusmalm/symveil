@@ -65,7 +65,7 @@ static IPV4: LazyLock<Regex> = LazyLock::new(|| Regex::new(IPV4_PATTERN).expect(
 static IPV6: LazyLock<Regex> = LazyLock::new(|| Regex::new(IPV6_PATTERN).expect("ipv6 regex"));
 
 pub fn ipv4_hits(text: &str) -> Vec<SecretHit> {
-    bounded_hits(text, &IPV4, "ipv4", ip_edge_ok, |value| {
+    bounded_hits(text, &IPV4, "ipv4", ip_boundary_ok, |value| {
         !matches!(value, "0.0.0.0" | "127.0.0.1" | "255.255.255.255")
     })
 }
@@ -141,9 +141,21 @@ fn bounded_hits(
     hits
 }
 
-fn ip_edge_ok(text: &str, start: usize, end: usize) -> bool {
-    let bad = |c: char| c.is_ascii_digit() || c == '.';
-    !edge_is(text, start, true, bad) && !edge_is(text, end, false, bad)
+pub(crate) fn ip_boundary_ok(text: &str, start: usize, end: usize) -> bool {
+    let bad_before = |c: char| c.is_ascii_digit() || c == '.';
+    if edge_is(text, start, true, bad_before) {
+        return false;
+    }
+    // A following digit extends the last octet. A following dot extends a
+    // longer dotted sequence only when a digit comes next (`10.1.2.3.4`).
+    // Sentence punctuation (`10.1.2.3.`) is not part of the address.
+    let mut rest = text[end..].chars();
+    match rest.next() {
+        None => true,
+        Some(c) if c.is_ascii_digit() => false,
+        Some('.') => !rest.next().is_some_and(|next| next.is_ascii_digit()),
+        Some(_) => true,
+    }
 }
 
 fn ipv6_edge_ok(text: &str, start: usize, end: usize) -> bool {
@@ -164,4 +176,30 @@ fn edge_is(text: &str, at: usize, before: bool, bad: impl Fn(char) -> bool) -> b
         text[at..].chars().next()
     };
     ch.is_some_and(bad)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ipv4_hits;
+
+    fn spans(text: &str) -> Vec<&str> {
+        ipv4_hits(text)
+            .iter()
+            .map(|hit| &text[hit.start..hit.end])
+            .collect()
+    }
+
+    #[test]
+    fn sentence_punctuation_does_not_hide_an_ipv4() {
+        assert_eq!(spans("at 10.8.8.8."), vec!["10.8.8.8"]);
+        assert_eq!(spans("at 10.8.8.8, next"), vec!["10.8.8.8"]);
+        assert_eq!(spans("at 10.8.8.8"), vec!["10.8.8.8"]);
+    }
+
+    #[test]
+    fn a_longer_dotted_sequence_is_not_an_ipv4() {
+        assert!(spans("10.8.8.8.9").is_empty());
+        assert!(spans(".10.8.8.8").is_empty());
+        assert!(spans("keep 127.0.0.1").is_empty());
+    }
 }

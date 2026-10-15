@@ -229,10 +229,7 @@ fn ident_boundary(text: &str, start: usize, end: usize) -> bool {
 }
 
 fn ip_boundary(text: &str, start: usize, end: usize) -> bool {
-    let bad = |ch: char| ch.is_ascii_digit() || ch == '.';
-    let left_bad = start > 0 && text[..start].chars().next_back().is_some_and(bad);
-    let right_bad = end < text.len() && text[end..].chars().next().is_some_and(bad);
-    !left_bad && !right_bad
+    crate::scan::ip_boundary_ok(text, start, end)
 }
 
 fn is_ident_continue(ch: char) -> bool {
@@ -332,6 +329,11 @@ mod tests {
             .iter()
             .any(|hit| hit.rule.as_deref() == Some("aws-access-key-id")));
         assert!(redacted.contains("see: also"));
+        let sentence = "at 10.8.8.8. and 10.8.8.8.9 stays";
+        let (punctuated, _) = engine.redact_str(sentence).unwrap();
+        assert!(!punctuated.contains("at 10.8.8.8"));
+        assert!(punctuated.contains("10.8.8.8.9 stays"), "{punctuated}");
+        assert_eq!(engine.restore_str(&punctuated), sentence);
         assert!(redacted.contains("12:34:56"));
         assert_eq!(engine.restore_str(&redacted), input);
         let (plain, _) = engine
