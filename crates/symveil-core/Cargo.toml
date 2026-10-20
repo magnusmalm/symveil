@@ -2,9 +2,28 @@
 name = "symveil-core"
 version = "0.1.0"
 edition = "2021"
+authors = ["Magnus Malm <magnusmalm@protonmail.com>"]
 description = "Free-tier secret masking library for the SymVeil local proxy"
-publish = false
 license = "Apache-2.0"
+repository = "https://github.com/magnusmalm/symveil"
+homepage = "https://symveil.dev"
+readme = "README.md"
+keywords = ["redaction", "secrets", "proxy", "privacy", "llm"]
+categories = ["network-programming", "development-tools", "text-processing"]
+# Library source only. LICENSE is a copy of the repository Apache-2.0 text.
+# Unit tests live in src/ and use documented example values such as the AWS
+# sample access key id. There is no identifier masker.
+# Cargo ignores `exclude` when `include` is set; `include` is the package.
+include = [
+    "src/**/*",
+    "LICENSE",
+    "README.md",
+    "Cargo.toml",
+]
+exclude = [
+    "tests/**/*",
+    "tests/fixtures/**/*",
+]
 
 [dependencies]
 anyhow = "1"

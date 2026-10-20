@@ -6,20 +6,55 @@ resolver = "2"
 name = "symveil"
 version = "0.1.0"
 edition = "2021"
+authors = ["Magnus Malm <magnusmalm@protonmail.com>"]
 description = "Local secret-masking proxy between coding agents and cloud LLMs"
-publish = false
 license = "Apache-2.0"
+repository = "https://github.com/magnusmalm/symveil"
+homepage = "https://symveil.dev"
+readme = "README.md"
+keywords = ["cli", "proxy", "redaction", "secrets", "llm"]
+categories = [
+    "command-line-utilities",
+    "network-programming",
+    "development-tools",
+    "artificial-intelligence",
+]
+# The crates.io tarball is the Apache-2.0 proxy only. Integration tests,
+# the demo, and release tooling stay in git. The `identifiers` feature is
+# not declared, so the proprietary code-name crate is not a dependency.
+# Cargo ignores `exclude` when `include` is set; `include` is the package.
+include = [
+    "src/**/*",
+    "LICENSE",
+    "README.md",
+    "Cargo.lock",
+    "Cargo.toml",
+]
+exclude = [
+    "tests/**/*",
+    "assets/**/*",
+    ".github/**/*",
+    "packaging/**/*",
+    "crates/**/*",
+    "demo/**/*",
+    "target/**/*",
+]
 
 # src/plugins.rs and src/main.rs keep an inert `cfg(feature = "identifiers")`
 # hook. This tree does not declare that feature, so check-cfg stays quiet.
 [lints.rust]
 unexpected_cfgs = "allow"
 
+# cargo-dist builds with this profile. It is the release profile plus thin LTO.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-symveil-core = { path = "crates/symveil-core" }
+symveil-core = { version = "0.1.0", path = "crates/symveil-core" }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
