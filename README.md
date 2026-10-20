@@ -10,6 +10,44 @@ The vault and the audit log stay on the machine. Upstream sees placeholders of t
 
 The free tier masks secrets. Pro identifier and code-name masking is at [symveil.dev](https://symveil.dev).
 
+## Install
+
+From crates.io, once 0.1.0 is published:
+
+```bash
+cargo install symveil
+```
+
+That build is the Apache-2.0 proxy in this repository.
+
+Homebrew, after release:
+
+```bash
+brew install magnusmalm/symveil/symveil
+```
+
+The tap `magnusmalm/homebrew-symveil` does not exist until the steps in [RELEASING.md](RELEASING.md) are done. Until then, `brew install` will not find the formula.
+
+Prebuilt archives, after the `v0.1.0` GitHub Release exists:
+
+| Archive | System |
+| --- | --- |
+| `symveil-x86_64-unknown-linux-gnu.tar.gz` | Linux x86_64 |
+| `symveil-aarch64-unknown-linux-gnu.tar.gz` | Linux aarch64 |
+| `symveil-x86_64-apple-darwin.tar.gz` | macOS x86_64 |
+| `symveil-aarch64-apple-darwin.tar.gz` | macOS aarch64 |
+| `symveil-x86_64-pc-windows-msvc.zip` | Windows x86_64 |
+
+Each archive has a sibling `.sha256` file, and the release also has `sha256.sum`. The shell and PowerShell installers on that release are `symveil-installer.sh` and `symveil-installer.ps1`.
+
+From a git checkout before those channels exist:
+
+```bash
+cargo build --release
+```
+
+The binary is `target/release/symveil`.
+
 ## What it masks
 
 Builtin rules, always on:

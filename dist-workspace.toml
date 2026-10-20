@@ -1,0 +1,29 @@
+[workspace]
+members = ["cargo:."]
+
+# cargo-dist (dist 0.32.0). A push of a v* tag builds the archives.
+# Pull requests run the same build and upload CI artifacts only.
+# Nothing in this file publishes on its own.
+[dist]
+cargo-dist-version = "0.32.0"
+ci = "github"
+hosting = "github"
+installers = ["shell", "powershell", "homebrew"]
+tap = "magnusmalm/homebrew-symveil"
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+publish-jobs = ["homebrew"]
+pr-run-mode = "upload"
+install-updater = false
+checksum = "sha256"
+unix-archive = ".tar.gz"
+windows-archive = ".zip"
+github-attestations = false
+create-release = true
+# release.yml keeps a v* tag filter. dist plan must not reject that edit.
+allow-dirty = ["ci"]

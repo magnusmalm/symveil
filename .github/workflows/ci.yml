@@ -18,3 +18,13 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace --locked
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: package and dry-run publish
+        run: |
+          cargo package --workspace --locked
+          cargo publish --workspace --locked --dry-run
