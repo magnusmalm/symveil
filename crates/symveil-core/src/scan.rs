@@ -7,6 +7,11 @@ use crate::category::Category;
 use crate::masker::{Boundary, Candidate, Masker, PRI_PATTERN};
 use crate::secrets::SecretHit;
 
+pub const IPV4_RULE: &str = "ipv4";
+pub const IPV6_RULE: &str = "ipv6";
+pub const HOSTNAME_RULE: &str = "internal-hostname";
+pub const NETWORK_RULES: &[&str] = &[IPV4_RULE, IPV6_RULE, HOSTNAME_RULE];
+
 /// Live detection of addresses and internal hostnames. This is part of the
 /// free proxy: it does not use the identifier index.
 pub struct NetworkMasker {
@@ -65,13 +70,13 @@ static IPV4: LazyLock<Regex> = LazyLock::new(|| Regex::new(IPV4_PATTERN).expect(
 static IPV6: LazyLock<Regex> = LazyLock::new(|| Regex::new(IPV6_PATTERN).expect("ipv6 regex"));
 
 pub fn ipv4_hits(text: &str) -> Vec<SecretHit> {
-    bounded_hits(text, &IPV4, "ipv4", ip_boundary_ok, |value| {
+    bounded_hits(text, &IPV4, IPV4_RULE, ip_boundary_ok, |value| {
         !matches!(value, "0.0.0.0" | "127.0.0.1" | "255.255.255.255")
     })
 }
 
 pub fn ipv6_hits(text: &str) -> Vec<SecretHit> {
-    bounded_hits(text, &IPV6, "ipv6", ipv6_edge_ok, is_redactable_ipv6)
+    bounded_hits(text, &IPV6, IPV6_RULE, ipv6_edge_ok, is_redactable_ipv6)
 }
 
 fn is_redactable_ipv6(value: &str) -> bool {
@@ -112,7 +117,7 @@ pub fn hostname_hits(text: &str, regex: &Regex) -> Vec<SecretHit> {
         hits.push(SecretHit {
             start: matched.start(),
             end: matched.end(),
-            rule: "internal-hostname".to_string(),
+            rule: HOSTNAME_RULE.to_string(),
         });
     }
     hits

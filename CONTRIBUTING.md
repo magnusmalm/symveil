@@ -17,7 +17,7 @@ cargo test --workspace
 ## Changes
 
 - Keep the proxy local. It binds to loopback unless the user points `listen` elsewhere, and it should keep doing that by default.
-- Do not log secret values. The audit log records the rule, the length, and the placeholder.
+- Do not log secret values. The audit log records the rule, the action, and the length. A redacted secret also records its placeholder. Warn and block entries do not.
 - New secret rules belong next to the existing builtin list, with a regression test that the value is masked and then restored.
 - Run `cargo fmt --all` before sending a change.
 

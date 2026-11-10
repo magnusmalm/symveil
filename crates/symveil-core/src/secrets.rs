@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use regex::Regex;
 
 use crate::category::Category;
-use crate::config::UserPattern;
+use crate::config::SecretRule;
 use crate::masker::{Boundary, Candidate, Masker, PRI_SECRET};
 use crate::vault::Vault;
 
@@ -28,6 +28,10 @@ const BUILTINS: &[(&str, &str)] = &[
     ),
 ];
 
+pub fn builtin_rule_names() -> Vec<&'static str> {
+    BUILTINS.iter().map(|(name, _)| *name).collect()
+}
+
 #[derive(Debug)]
 pub struct SecretHit {
     pub start: usize,
@@ -40,7 +44,7 @@ pub struct SecretSet {
 }
 
 impl SecretSet {
-    pub fn compile(user: &[UserPattern]) -> Result<Self> {
+    pub fn compile(user: &[SecretRule]) -> Result<Self> {
         let mut rules = Vec::with_capacity(BUILTINS.len() + user.len());
         for (name, pattern) in BUILTINS {
             let regex =
@@ -91,7 +95,7 @@ pub struct SecretMasker {
 }
 
 impl SecretMasker {
-    pub(crate) fn compile(user: &[UserPattern], vault: &Vault) -> Result<Self> {
+    pub(crate) fn compile(user: &[SecretRule], vault: &Vault) -> Result<Self> {
         let mut literals = Vec::new();
         for entry in vault.iter() {
             if entry.original.is_empty() || entry.category != Category::Secret {
