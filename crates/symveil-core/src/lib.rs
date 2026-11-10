@@ -1,5 +1,6 @@
 //! Free tier of SymVeil: a local proxy that masks secrets before they reach a
-//! cloud model and restores them in the response.
+//! cloud model and restores them in the response. Personal-data rules are
+//! installed only when `[redact.pii]` turns them on.
 //!
 //! Identifier and code-name masking is not in this crate. It is a [`Masker`]
 //! plugin loaded by the `symveil` binary when that binary is built with the
@@ -11,6 +12,7 @@ pub mod audit;
 pub mod category;
 pub mod config;
 pub mod masker;
+pub mod pii;
 pub mod proxy;
 pub mod redact;
 pub mod scan;
