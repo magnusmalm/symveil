@@ -12,7 +12,7 @@ use symveil::build_engine;
 use symveil::category::Category;
 use symveil::config::{resolve_path, Config};
 use symveil::proxy::{self, AppState};
-use symveil::vault::Vault;
+use symveil::vault::{vault_key_path, Vault};
 
 #[cfg(feature = "identifiers")]
 use symveil::{index_repo, IndexOptions, IndexReport};
@@ -259,8 +259,13 @@ async fn cmd_proxy(args: ProxyArgs) -> Result<()> {
     eprintln!("  masking     secrets and identifiers");
     #[cfg(not(feature = "identifiers"))]
     eprintln!("  masking     secrets");
-    eprintln!("  vault       {entries} entries ({})", vault_path.display());
+    eprintln!(
+        "  vault       {entries} entries ({}, encrypted at rest)",
+        vault_path.display()
+    );
+    eprintln!("  vault key   {}", vault_key_path(&vault_path).display());
     eprintln!("  audit       {}", audit_path.display());
+    let _ = io::stderr().flush();
     proxy::serve(listener, state).await
 }
 
