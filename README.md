@@ -24,7 +24,28 @@ Builtin rules, always on:
 
 It also masks IPv4 and IPv6 addresses (keeping `127.0.0.1`, `0.0.0.0`, `255.255.255.255`, and `::1`) and hostnames under the configured internal domains. Add your own secret rules under `[[redact.secrets]]`.
 
-An allow entry does not exempt a secret.
+An allow entry does not exempt a secret or a personal-data match.
+
+## Optional personal data
+
+Emails, phone numbers, and Swedish identity numbers are off unless you opt in. Person names are not masked. A name needs a model, not a regex, and this proxy does not ship one.
+
+```toml
+[redact.pii]
+email = true
+phone = true
+personnummer = true
+```
+
+Each flag defaults to `false`. Leave the section out and those values are sent through unchanged.
+
+`email` matches an address with a dotted domain, such as `ada@example.com`. `user@host` and `user@localhost` stay, because there is no dot. `git@github.com:org/repo.git` stays too: a colon followed by a path is an ssh/scp remote. `git@github.com` with no colon is masked, and so is `user@box.local`, because those shapes are also mailboxes. `user@10.1.2.3` is not an email; a public address there is still masked by the IP rule.
+
+`phone` matches E.164 numbers that start with `+`, and common Swedish numbers: `070-123 45 67`, `0701234567`, `08-123 456 78`, `08-12345678`, `+46 70 123 45 67`, `+46 (0) 70 …`. Spaces, hyphens, and parentheses are separators. A leading `00` is accepted when the rest is grouped (`0046 70 …`). Dotted numbers (`+1.2.3`, `+1.202.555.0143`, `+46.70…`) are not phones, so version strings stay. A compact landline with no separator (`0812345678`) stays; write it with a hyphen or as `+46…`. A compact `0046…` with no separator stays for the same reason. A 10-digit mobile with no separator is masked, so an order number with that exact shape is too. Groups are short (at most four digits, or eight in the last group), which keeps a following personnummer or order number intact.
+
+`personnummer` matches Swedish personnummer and samordningsnummer. Both the 10-digit and 12-digit forms are accepted, with or without one `-` or `+`. A samordningsnummer is the same shape with the day in 61–91 (the real day plus 60). The 10-digit payload has to pass the Luhn check, and the day has to be possible. A 12-digit year has to fall in 1800–2099, and February 29 only when that year is a leap year. A 10-digit number has no century, so February 29 is accepted when some year 1800–2099 with those two digits is a leap year (`00` can be 2000; `99` cannot). `2024-11-10`, a git SHA, and `123456789012` stay. So does `ORD-20990101-9993` and `v209901019993`, because a hyphen or a letter glued to the digits is an order number or a version tag, not an identity number written on its own. A bare number that is both a valid identity number and an order number cannot be told apart, so it is masked. Spaces, as in `20990101 - 9993`, are not a supported form.
+
+Matches use the `pii` category. The audit log stores the category, the rule (`email`, `phone-e164`, `phone-se`, `personnummer`, or `samordningsnummer`), and the length. It does not store the original value. The vault on this machine still stores it, so the reply can be restored.
 
 ## Quickstart
 
@@ -162,6 +183,8 @@ internal_domains = ["corp", "internal", "lan"]
 name = "acme-factory-token"
 regex = '\bacme_live_[A-Za-z0-9]{16,}\b'
 ```
+
+Personal data stays off until `[redact.pii]` sets `email`, `phone`, or `personnummer`. See [Optional personal data](#optional-personal-data).
 
 `.symveil/` is gitignored. The vault is the reverse map, including secrets. Do not copy it off the machine.
 
