@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::category::Category;
+use crate::config::Action;
 use crate::redact::Hit;
 
 #[derive(Debug, Serialize)]
@@ -23,11 +24,15 @@ pub struct AuditEvent {
 #[derive(Debug, Serialize)]
 pub struct AuditReplacement {
     pub category: Category,
-    pub placeholder: String,
+    pub action: Action,
+    /// Present when the match was replaced. Warn and block do not mint a placeholder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule: Option<String>,
     pub len: usize,
-    /// Present for identifiers. Omitted for secrets so the log is not a second copy of them.
+    /// Present for identifiers, addresses, and hostnames. Omitted for secrets so the
+    /// log is not a second copy of them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original: Option<String>,
 }
@@ -46,9 +51,14 @@ pub fn replacement_from_hit(hit: &Hit) -> AuditReplacement {
         | Category::Ip
         | Category::Identifier => Some(hit.original.clone()),
     };
+    let placeholder = match hit.action {
+        Action::Redact => Some(hit.placeholder.clone()),
+        Action::Warn | Action::Block => None,
+    };
     AuditReplacement {
         category: hit.category,
-        placeholder: hit.placeholder.clone(),
+        action: hit.action,
+        placeholder,
         rule: hit.rule.clone(),
         len: hit.original.len(),
         original,
@@ -169,17 +179,60 @@ mod tests {
             placeholder: "@@sv:0123abcd@@".to_string(),
             category: Category::Secret,
             rule: Some("aws-access-key-id".to_string()),
+            action: Action::Redact,
         };
         let ident = Hit {
             original: "aurora_rcc_enable_pll".to_string(),
             placeholder: "@@sv:abcdef01@@".to_string(),
             category: Category::Function,
             rule: None,
+            action: Action::Redact,
         };
         let secret_json = serde_json::to_string(&replacement_from_hit(&secret)).unwrap();
         assert!(!secret_json.contains("AKIA"));
         assert!(secret_json.contains("aws-access-key-id"));
+        assert!(secret_json.contains("\"action\":\"redact\""));
+        assert!(secret_json.contains("@@sv:0123abcd@@"));
         let ident_json = serde_json::to_string(&replacement_from_hit(&ident)).unwrap();
         assert!(ident_json.contains("aurora_rcc_enable_pll"));
+    }
+
+    #[test]
+    fn warn_and_block_omit_the_secret_and_any_placeholder() {
+        let secret = "widget_tok_abcd1234";
+        for action in [Action::Warn, Action::Block] {
+            let hit = Hit {
+                original: secret.to_string(),
+                placeholder: String::new(),
+                category: Category::Secret,
+                rule: Some("widget-token".to_string()),
+                action,
+            };
+            let json = serde_json::to_string(&replacement_from_hit(&hit)).unwrap();
+            assert!(!json.contains(secret), "{json}");
+            assert!(!json.contains("widget_tok"), "{json}");
+            assert!(!json.contains("placeholder"), "{json}");
+            assert!(json.contains("widget-token"), "{json}");
+            assert!(json.contains(&format!("\"action\":\"{action}\"")), "{json}");
+            assert!(
+                json.contains(&format!("\"len\":{}", secret.len())),
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
+    fn warn_still_records_an_address() {
+        let hit = Hit {
+            original: "10.1.2.3".to_string(),
+            placeholder: String::new(),
+            category: Category::Ip,
+            rule: Some("ipv4".to_string()),
+            action: Action::Warn,
+        };
+        let json = serde_json::to_string(&replacement_from_hit(&hit)).unwrap();
+        assert!(json.contains("10.1.2.3"), "{json}");
+        assert!(json.contains("\"action\":\"warn\""));
+        assert!(!json.contains("placeholder"), "{json}");
     }
 }
