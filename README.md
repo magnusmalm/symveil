@@ -165,6 +165,14 @@ regex = '\bacme_live_[A-Za-z0-9]{16,}\b'
 
 `.symveil/` is gitignored. The vault is the reverse map, including secrets. Do not copy it off the machine.
 
+## Claude Code plugin (spike)
+
+`integrations/claude-code/` is a throwaway prototype for [issue #8](https://github.com/magnusmalm/symveil/issues/8). It is not a release, and it is not registered with a plugin directory. The research note is [docs/research/claude-code-plugin.md](docs/research/claude-code-plugin.md).
+
+A plugin manifest cannot set `ANTHROPIC_BASE_URL`. The file `integrations/claude-code/project.settings.json` is an example `env` block to copy into a project's `.claude/settings.local.json`, which is what points the Claude Code CLI at `http://127.0.0.1:8787`. The `UserPromptSubmit` hook runs `symveil detect` and can warn or block. It cannot rewrite the prompt, and it does not mask anything. SymVeil does not isolate the agent or contain its tool calls.
+
+The proxy only sees bytes that reach it. Claude Code still writes session transcripts, including tool output, under `~/.claude/`. A saved permission rule can keep a command that contains a secret in `.claude/settings.local.json`. This plugin does not read or edit those files.
+
 ## Development
 
 ```bash

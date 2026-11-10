@@ -1,0 +1,14 @@
+{
+  "name": "symveil-local",
+  "description": "Local checkout only. Do not register this with a plugin directory or add the GitHub repository as a marketplace.",
+  "owner": {
+    "name": "SymVeil"
+  },
+  "plugins": [
+    {
+      "name": "symveil",
+      "source": "./",
+      "description": "Prototype hook that warns or blocks on SymVeil detection. It does not set ANTHROPIC_BASE_URL."
+    }
+  ]
+}

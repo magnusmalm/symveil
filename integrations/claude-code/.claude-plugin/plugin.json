@@ -1,0 +1,11 @@
+{
+  "name": "symveil",
+  "displayName": "SymVeil (prototype)",
+  "version": "0.0.0",
+  "description": "Throwaway local prototype. Warns or blocks when a prompt matches SymVeil detection, and tells you when Claude Code is not pointed at a local proxy. It does not mask the prompt and it is not a marketplace release.",
+  "author": {
+    "name": "SymVeil"
+  },
+  "license": "Apache-2.0",
+  "hooks": "./hooks/hooks.json"
+}
