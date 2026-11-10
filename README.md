@@ -10,6 +10,12 @@ The vault and the audit log stay on the machine. Upstream sees placeholders of t
 
 The free tier masks secrets. Pro identifier and code-name masking is at [symveil.dev](https://symveil.dev).
 
+## Similar tools
+
+[AgentVeil](https://github.com/vurakit/agentveil) and [runveil](https://github.com/dawnn07/runveil) also sit between a coding agent and the model API. AgentVeil masks personal data and checks prompts for injection, and its vault is in Redis. runveil intercepts TLS through a local CA and can block or warn per rule. A [paid team plan](https://runveil-cloud.vercel.app/) includes central policy.
+
+SymVeil masks secrets, IP addresses, and internal hostnames, and restores them in the reply. Setup is a base URL, with no CA or Redis. The notes above were checked on 2026-11-09. Full comparison: [symveil.dev/compare/symveil-vs-agentveil-runveil](https://symveil.dev/compare/symveil-vs-agentveil-runveil/).
+
 ## What it masks
 
 Builtin rules, always on:
