@@ -20,9 +20,18 @@ Builtin rules, always on:
 - Google API keys
 - Stripe live secrets
 - PEM private keys
-- `api_key`, `secret`, `token`, and `password` assignments
+- Quoted `api_key`, `apikey`, `secret`, `token`, and `password` assignments (the value only)
+- `.env` assignments whose names are uppercase and end in `_KEY`, `_SECRET`, `_TOKEN`, `_PASSWORD`, or `_PASS`. A leading `export`, spaces around `=`, single or double quotes, and a trailing `#` comment are recognized. Only the value is masked.
+- OpenAI keys: `sk-` plus 48 alphanumeric characters, and `sk-proj-` keys
+- Anthropic keys that start with `sk-ant-`
+- JWTs with three base64url segments and a header starting with `eyJ`
+- The password in a URL with userinfo (`scheme://user:password@host`). The user and host stay.
 
-It also masks IPv4 and IPv6 addresses (keeping `127.0.0.1`, `0.0.0.0`, `255.255.255.255`, and `::1`) and hostnames under the configured internal domains. Add your own secret rules under `[[redact.secrets]]`.
+Assignment and URL-password values shorter than 8 characters, all-numeric assignment values, and placeholders such as `changeme`, `password`, and `${VAR}` are left in place. `TOKEN_LIMIT=4096` is not treated as a secret name. A secret-shaped name mentioned mid-line is not an assignment. `sk-admin-` and `sk-svcacct-` keys are not covered.
+
+It also masks IPv4 and IPv6 addresses (keeping `127.0.0.1`, `0.0.0.0`, `255.255.255.255`, and `::1`) and hostnames under the configured internal domains. An address has to stand on its own, so a Rust path such as `std::env` is left alone. Add your own secret rules under `[[redact.secrets]]`.
+
+Set `high_entropy = true` under `[redact]` to also mask tokens of 32 to 4096 characters whose Shannon entropy is at least 4.5 bits per character. It is off by default. Hex strings, UUIDs, and tokens that start with `sha1-`, `sha256-`, `sha384-`, or `sha512-` are skipped. Other long base64 blobs are still masked, which is why the switch stays off.
 
 An allow entry does not exempt a secret.
 

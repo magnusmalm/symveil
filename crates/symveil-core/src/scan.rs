@@ -159,7 +159,9 @@ pub(crate) fn ip_boundary_ok(text: &str, start: usize, end: usize) -> bool {
 }
 
 fn ipv6_edge_ok(text: &str, start: usize, end: usize) -> bool {
-    let bad = |c: char| c.is_ascii_hexdigit() || c == ':';
+    // Any identifier character, not only a hex digit. `d::e` inside `std::env`
+    // is a valid address, and the letters around it are part of the path.
+    let bad = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == ':';
     !edge_is(text, start, true, bad) && !edge_is(text, end, false, bad)
 }
 
@@ -180,7 +182,7 @@ fn edge_is(text: &str, at: usize, before: bool, bad: impl Fn(char) -> bool) -> b
 
 #[cfg(test)]
 mod tests {
-    use super::ipv4_hits;
+    use super::{ipv4_hits, ipv6_hits};
 
     fn spans(text: &str) -> Vec<&str> {
         ipv4_hits(text)
@@ -194,6 +196,23 @@ mod tests {
         assert_eq!(spans("at 10.8.8.8."), vec!["10.8.8.8"]);
         assert_eq!(spans("at 10.8.8.8, next"), vec!["10.8.8.8"]);
         assert_eq!(spans("at 10.8.8.8"), vec!["10.8.8.8"]);
+    }
+
+    fn ipv6_spans(text: &str) -> Vec<&str> {
+        ipv6_hits(text)
+            .iter()
+            .map(|hit| &text[hit.start..hit.end])
+            .collect()
+    }
+
+    #[test]
+    fn rust_paths_are_not_ipv6_addresses() {
+        assert!(ipv6_spans("std::env::var").is_empty());
+        assert!(ipv6_spans("std::fs::read").is_empty());
+        assert!(ipv6_spans("std::io::Error").is_empty());
+        assert_eq!(ipv6_spans("see 2001:db8::1."), vec!["2001:db8::1"]);
+        assert_eq!(ipv6_spans("ping fe80::1 now"), vec!["fe80::1"]);
+        assert!(ipv6_spans("keep ::1").is_empty());
     }
 
     #[test]
