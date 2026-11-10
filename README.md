@@ -73,8 +73,6 @@ Checked with Grok Build 1.0.52 (`grok`) and a local mock upstream that recorded 
 >
 > No setting was found that disables this first title call. `features.title_refresh` and `GROK_TITLE_REFRESH` control a later refresh of an existing title. The docs and the 1.0.52 source (`models.session_summary`, env `GROK_SESSION_SUMMARY_MODEL`) select the model used for the title. Point that at the SymVeil custom model, as in the `config.toml` example. With `session_summary` set to that model, the mock recorded the title `POST /v1/responses` on the SymVeil base as `grok-4.7`, the secret in that body was already an `@@sv:…@@` placeholder, and grok made no request to `cli-chat-proxy.grok.com`.
 
-**Known limitation.** When a tool-argument stream splits one `@@sv:…@@` placeholder across two JSON fragments, Grok may concatenate it unrestored. A placeholder split only by HTTP chunk boundaries, inside one JSON value, was restored. On the Responses path the completed event carried the arguments in one piece, and those were restored.
-
 `responses` and `chat_completions` follow `--openai-base`. `messages` follows `--anthropic-base`. `GET /v1/models` follows `--openai-base`. Origins have no trailing `/v1`. The check pointed the two flags at two different mocks so the routes stayed distinct. Grok 4.7 used the Responses API.
 
 ```bash

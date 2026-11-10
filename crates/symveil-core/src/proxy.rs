@@ -14,7 +14,7 @@ use tokio::net::TcpListener;
 
 use crate::audit::AuditLog;
 use crate::redact::Engine;
-use crate::stream::ByteRestorer;
+use crate::stream::{ByteRestorer, SseRestorer};
 
 const MAX_BODY: usize = 32 * 1024 * 1024;
 
@@ -276,7 +276,7 @@ fn stream_body(
     path: String,
 ) -> Body {
     let body = stream! {
-        let mut restorer = ByteRestorer::new(map, json_escape);
+        let mut restorer = SseRestorer::new(map, json_escape);
         tokio::pin!(upstream);
         while let Some(item) = upstream.next().await {
             match item {
