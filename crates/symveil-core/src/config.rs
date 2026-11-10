@@ -126,6 +126,10 @@ pub struct RedactSection {
     pub patterns: Vec<UserPattern>,
     #[serde(default)]
     pub secrets: Vec<UserPattern>,
+    /// Scan long high-entropy tokens that no builtin names. Off by default:
+    /// mixed base64 blobs that are not credentials still match.
+    #[serde(default)]
+    pub high_entropy: bool,
 }
 
 impl Default for RedactSection {
@@ -136,6 +140,7 @@ impl Default for RedactSection {
             internal_domains: default_domains(),
             patterns: Vec::new(),
             secrets: Vec::new(),
+            high_entropy: false,
         }
     }
 }
@@ -207,6 +212,13 @@ mod tests {
         assert_eq!(cfg.proxy.listen, "127.0.0.1");
         assert_eq!(cfg.proxy.openai_base, "https://api.openai.com");
         assert_eq!(cfg.redact.internal_domains, vec!["corp", "internal", "lan"]);
+        assert!(!cfg.redact.high_entropy);
+    }
+
+    #[test]
+    fn high_entropy_can_be_enabled() {
+        let cfg: Config = toml::from_str("[redact]\nhigh_entropy = true\n").unwrap();
+        assert!(cfg.redact.high_entropy);
     }
 
     #[test]
