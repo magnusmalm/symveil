@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -39,6 +40,8 @@ enum Command {
     Redact(TextArgs),
     /// Restore placeholders on stdin back to the original text.
     Restore(TextArgs),
+    /// Report rule names for stdin. Does not write the vault or print matched text.
+    Detect(TextArgs),
 }
 
 #[cfg(feature = "identifiers")]
@@ -99,6 +102,7 @@ async fn run() -> Result<()> {
         Command::Proxy(args) => cmd_proxy(args).await,
         Command::Redact(args) => cmd_text(args, true),
         Command::Restore(args) => cmd_text(args, false),
+        Command::Detect(args) => cmd_detect(args),
     }
 }
 
@@ -264,18 +268,59 @@ async fn cmd_proxy(args: ProxyArgs) -> Result<()> {
     proxy::serve(listener, state).await
 }
 
-fn cmd_text(args: TextArgs, redact: bool) -> Result<()> {
+fn read_stdin_text() -> Result<String> {
     if io::stdin().is_terminal() {
         anyhow::bail!("pipe text on stdin");
     }
-    let (root, cfg) = load_context(&args.repo, args.config.as_deref())?;
-    let vault = open_vault(&root, &cfg)?;
-    let mut engine = build_engine(vault, &cfg.redact)?;
     let mut raw = String::new();
     io::stdin().read_to_string(&mut raw)?;
     if raw.len() > 32 * 1024 * 1024 {
         anyhow::bail!("stdin exceeds 32MiB");
     }
+    Ok(raw)
+}
+
+fn cmd_detect(args: TextArgs) -> Result<()> {
+    let raw = read_stdin_text()?;
+    let (_root, cfg) = load_context(&args.repo, args.config.as_deref())?;
+    let mut engine = build_engine(Vault::ephemeral(), &cfg.redact)?;
+    let json = serde_json::from_str::<serde_json::Value>(&raw).is_ok();
+    let hits = if json {
+        engine.redact_bytes(raw.as_bytes())?.1
+    } else {
+        engine.redact_str(&raw)?.1
+    };
+    let mut counts: BTreeMap<(String, String), u32> = BTreeMap::new();
+    for hit in &hits {
+        let rule = hit
+            .rule
+            .clone()
+            .unwrap_or_else(|| hit.category.as_str().to_string());
+        *counts
+            .entry((rule, hit.category.as_str().to_string()))
+            .or_default() += 1;
+    }
+    let items: Vec<_> = counts
+        .into_iter()
+        .map(|((rule, category), count)| {
+            serde_json::json!({
+                "rule": rule,
+                "category": category,
+                "count": count,
+            })
+        })
+        .collect();
+    serde_json::to_writer(io::stdout(), &serde_json::json!({ "hits": items }))?;
+    writeln!(io::stdout())?;
+    eprintln!("hits: {}", hits.len());
+    Ok(())
+}
+
+fn cmd_text(args: TextArgs, redact: bool) -> Result<()> {
+    let raw = read_stdin_text()?;
+    let (root, cfg) = load_context(&args.repo, args.config.as_deref())?;
+    let vault = open_vault(&root, &cfg)?;
+    let mut engine = build_engine(vault, &cfg.redact)?;
     let json = serde_json::from_str::<serde_json::Value>(&raw).is_ok();
     if redact {
         let (bytes, hits) = if json {
