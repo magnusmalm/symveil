@@ -255,6 +255,7 @@ impl Vault {
 }
 
 fn load_plaintext(path: &Path, bytes: &[u8]) -> Result<Vault> {
+    refuse_linked_plaintext(path)?;
     let entries = parse_entries(bytes).map_err(|err| {
         refused_error(path, &format!("plaintext vault could not be read: {err:#}"))
     })?;
@@ -344,6 +345,37 @@ fn serialize_payload(vault: &Vault) -> Result<Vec<u8>> {
         entries: vault.entries.values().cloned().collect(),
     };
     Ok(serde_json::to_vec(&file)?)
+}
+
+/// `rename` replaces one directory entry. A symlink or a second hard link
+/// would keep the plaintext inode after migration.
+fn refuse_linked_plaintext(path: &Path) -> Result<()> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) => {
+            return Err(refused_error(
+                path,
+                &format!("plaintext vault could not be inspected: {err}"),
+            ));
+        }
+    };
+    if meta.file_type().is_symlink() {
+        return Err(refused_error(
+            path,
+            "vault path is a symlink, so encrypting it would leave the target in plaintext",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() > 1 {
+            return Err(refused_error(
+                path,
+                "vault file has another hard link, so encrypting it would leave a plaintext copy",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn refused_error(path: &Path, reason: &str) -> anyhow::Error {
@@ -526,6 +558,31 @@ mod tests {
         let loaded = Vault::load(&path).unwrap();
         assert_eq!(loaded.placeholder(secret), Some(token.as_str()));
         assert_eq!(loaded.rule_of(secret), Some("aws-access-key-id"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_plaintext_is_not_migrated() {
+        let dir = temp_dir("vault-link");
+        let plain = br#"{"version":1,"entries":[{"original":"linked-secret-value","placeholder":"@@sv:89abcdef@@","category":"secret","rule":"aws-access-key-id"}]}"#;
+        let real = dir.join("real.json");
+        fs::write(&real, plain).unwrap();
+        let linked = dir.join("vault.json");
+        fs::hard_link(&real, &linked).unwrap();
+        let err = expect_err(Vault::load(&linked));
+        assert_refused(&err);
+        assert!(err_text(&err).contains("hard link"), "{}", err_text(&err));
+        assert_eq!(fs::read(&real).unwrap(), plain);
+        assert_eq!(fs::read(&linked).unwrap(), plain);
+        assert!(!vault_key_path(&linked).exists());
+
+        let via = dir.join("via.json");
+        std::os::unix::fs::symlink(&real, &via).unwrap();
+        let err = expect_err(Vault::load(&via));
+        assert_refused(&err);
+        assert!(err_text(&err).contains("symlink"), "{}", err_text(&err));
+        assert_eq!(fs::read(&real).unwrap(), plain);
         let _ = fs::remove_dir_all(&dir);
     }
 

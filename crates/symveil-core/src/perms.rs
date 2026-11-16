@@ -7,6 +7,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
@@ -15,6 +16,7 @@ const FILE_MODE: u32 = 0o600;
 const DIR_MODE: u32 = 0o700;
 
 static WARNED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn ensure_private_dir(dir: &Path) -> Result<()> {
     if dir.as_os_str().is_empty() {
@@ -57,7 +59,7 @@ pub(crate) fn others_can_access(mode: u32) -> bool {
 pub(crate) fn write_atomic_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = temp_sibling(path);
     {
-        let mut file = open_truncate_private(&tmp)?;
+        let mut file = open_create_new_private(&tmp)?;
         file.write_all(bytes)
             .with_context(|| format!("write {}", tmp.display()))?;
         file.sync_all()
@@ -91,6 +93,8 @@ pub(crate) fn create_new_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(path);
         return Err(err);
     }
+    // The directory entry has to be durable before a plaintext vault is replaced.
+    fsync_parent(path);
     Ok(())
 }
 
@@ -115,9 +119,9 @@ pub(crate) fn open_append_private(path: &Path) -> Result<File> {
     Ok(file)
 }
 
-fn open_truncate_private(path: &Path) -> Result<File> {
+fn open_create_new_private(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -199,8 +203,10 @@ fn temp_sibling(path: &Path) -> PathBuf {
     let file_name = path
         .file_name()
         .unwrap_or_else(|| std::ffi::OsStr::new("vault"));
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let mut name = file_name.to_os_string();
-    name.push(".tmp");
+    // A shared `vault.json.tmp` lets two saves rename a truncated file into place.
+    name.push(format!(".{}.{seq}.tmp", std::process::id()));
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
         _ => PathBuf::from(name),
@@ -221,7 +227,9 @@ fn fsync_parent(path: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::others_can_access;
+    use std::path::Path;
+
+    use super::{others_can_access, temp_sibling};
 
     #[test]
     fn group_or_other_bits_are_too_open() {
@@ -232,5 +240,17 @@ mod tests {
         assert!(!others_can_access(0o600));
         assert!(!others_can_access(0o700));
         assert!(!others_can_access(0o400));
+    }
+
+    #[test]
+    fn temp_names_are_unique() {
+        let path = Path::new("/repo/.symveil/vault.json");
+        let first = temp_sibling(path);
+        let second = temp_sibling(path);
+        assert_ne!(first, second);
+        let name = first.file_name().unwrap().to_string_lossy();
+        assert!(name.contains(&std::process::id().to_string()), "{name}");
+        assert!(name.ends_with(".tmp"), "{name}");
+        assert_eq!(first.parent(), path.parent());
     }
 }
