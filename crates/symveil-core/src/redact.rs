@@ -6,6 +6,7 @@ use serde_json::Value;
 use crate::category::Category;
 use crate::config::RedactSection;
 use crate::masker::{Boundary, Candidate, Masker};
+use crate::pii::PiiMasker;
 use crate::scan::NetworkMasker;
 use crate::secrets::SecretMasker;
 use crate::stream::{self, placeholder_ranges};
@@ -35,14 +36,16 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Secret and network maskers only. Identifier plugins are added with
+    /// Secret and network maskers, plus personal-data rules when `[redact.pii]`
+    /// enables any of them. Identifier plugins are added with
     /// [`Engine::with_maskers`].
     pub fn new(vault: Vault, redact: &RedactSection) -> Result<Self> {
         Self::with_maskers(vault, redact, Vec::new())
     }
 
-    /// `extra` plugins run after the built-in secret and network maskers.
-    /// Built-ins are always installed, including when `extra` is empty.
+    /// `extra` plugins run after the built-in maskers. Built-ins are always
+    /// installed, including when `extra` is empty. The personal-data masker is
+    /// installed only when a `[redact.pii]` flag is set.
     pub fn with_maskers(
         vault: Vault,
         redact: &RedactSection,
@@ -50,9 +53,12 @@ impl Engine {
     ) -> Result<Self> {
         let allow: HashSet<String> = redact.allow.iter().cloned().collect();
         let deny: HashSet<String> = redact.deny.iter().cloned().collect();
-        let mut maskers: Vec<Box<dyn Masker>> = Vec::with_capacity(2 + extra.len());
+        let mut maskers: Vec<Box<dyn Masker>> = Vec::with_capacity(3 + extra.len());
         maskers.push(Box::new(SecretMasker::compile(&redact.secrets, &vault)?));
         maskers.push(Box::new(NetworkMasker::compile(&redact.internal_domains)?));
+        if redact.pii.enabled() {
+            maskers.push(Box::new(PiiMasker::compile(&redact.pii)));
+        }
         maskers.extend(extra);
         Ok(Self {
             vault,
@@ -176,7 +182,8 @@ impl Engine {
     }
 
     fn skipped(&self, matched: &str, category: Category) -> bool {
-        if category == Category::Secret {
+        // Allow-listing is for identifiers. Secrets and personal data still go.
+        if matches!(category, Category::Secret | Category::Pii) {
             return false;
         }
         self.allow.contains(matched) && !self.deny.contains(matched)

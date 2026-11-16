@@ -10,7 +10,7 @@ use axum::Router;
 use bytes::Bytes;
 use symveil::audit::AuditLog;
 use symveil::build_engine;
-use symveil::config::RedactSection;
+use symveil::config::{PiiSection, RedactSection};
 use symveil::proxy::AppState;
 use symveil::vault::Vault;
 use tokio::net::TcpListener;
@@ -175,6 +175,210 @@ async fn messages_and_responses_go_to_the_right_upstream() {
     assert_eq!(openai_seen[0].path, "/v1/responses");
     assert!(!String::from_utf8_lossy(&openai_seen[0].body).contains("AKIA"));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Synthetic values only: `example.com`, reserved `555` numbering, and
+/// checksum-valid identity numbers dated 2099 (not issued to a person).
+/// The literals are locked by `pii::tests::synthetic_checksum_fixtures`.
+const PII_PROMPT: &str = "\
+Reach ada@example.com or +46 70 000 00 00 about 20990101-9993 and 990161-9990. \
+Keep ssh user@host, git@github.com:acme/widgets.git, date 2024-11-10, version 1.2.3, \
+sha a1b2c3d4e5f6789012345678901234567890abcd, and bad 20990101-9994.";
+
+const PII_VALUES: &[&str] = &[
+    "ada@example.com",
+    "+46 70 000 00 00",
+    "20990101-9993",
+    "990161-9990",
+];
+
+const PII_KEEPERS: &[&str] = &[
+    "user@host",
+    "git@github.com:acme/widgets.git",
+    "2024-11-10",
+    "1.2.3",
+    "a1b2c3d4e5f6789012345678901234567890abcd",
+    "20990101-9994",
+];
+
+#[tokio::test]
+async fn pii_on_masks_each_type_and_restores_the_stream() {
+    let mut engine = build_engine(Vault::ephemeral(), &pii_redact(true)).unwrap();
+    let (preview, hits) = engine.redact_str(PII_PROMPT).unwrap();
+    assert_eq!(hits.len(), PII_VALUES.len(), "{preview}");
+    for value in PII_VALUES {
+        assert!(
+            !preview.contains(value),
+            "{value} reached the preview: {preview}"
+        );
+        assert!(
+            hits.iter()
+                .any(|hit| hit.original == *value && hit.category.as_str() == "pii"),
+            "missing {value}"
+        );
+    }
+    for keeper in PII_KEEPERS {
+        assert!(preview.contains(keeper), "{keeper} missing from {preview}");
+    }
+    let restored_bits: Vec<String> = hits.iter().map(|hit| hit.placeholder.clone()).collect();
+    let spoken = hits
+        .iter()
+        .map(|hit| hit.placeholder.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let sse = format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{spoken}\"}}}}]}}\n\ndata: [DONE]\n\n"
+    );
+
+    let (openai, openai_hits) = spawn_mock(sse.into_bytes(), true).await;
+    let (anthropic, _) = spawn_mock(b"{}".to_vec(), false).await;
+    let dir = temp_dir("audit-pii");
+    let audit_path = dir.join("audit.jsonl");
+    let state = AppState::new(
+        engine,
+        openai,
+        anthropic,
+        AuditLog::open(&audit_path).unwrap(),
+        30,
+    )
+    .unwrap();
+    let proxy = spawn_proxy(state).await;
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .body(pii_request())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-symveil-redactions")
+            .and_then(|value| value.to_str().ok()),
+        Some("4")
+    );
+    let body = response.text().await.unwrap();
+    for value in PII_VALUES {
+        assert!(
+            body.contains(value),
+            "response did not restore {value}: {body}"
+        );
+    }
+    for placeholder in &restored_bits {
+        assert!(!body.contains(placeholder), "placeholder leaked: {body}");
+    }
+    assert!(body.contains("[DONE]"));
+
+    let seen = openai_hits.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    let forwarded = content_of(&seen[0].body);
+    for value in PII_VALUES {
+        assert!(
+            !forwarded.contains(value),
+            "{value} reached upstream: {forwarded}"
+        );
+    }
+    for keeper in PII_KEEPERS {
+        assert!(
+            forwarded.contains(keeper),
+            "{keeper} was masked on the way out: {forwarded}"
+        );
+    }
+
+    let audit = std::fs::read_to_string(&audit_path).unwrap();
+    for value in PII_VALUES {
+        assert!(
+            !audit.contains(value),
+            "{value} written to the audit log: {audit}"
+        );
+    }
+    let mut saw_request = false;
+    for line in audit.lines() {
+        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+        if event["dir"] != "request" {
+            continue;
+        }
+        saw_request = true;
+        let replacements = event["replacements"].as_array().unwrap();
+        assert_eq!(replacements.len(), PII_VALUES.len());
+        for replacement in replacements {
+            assert_eq!(replacement["category"], "pii");
+            assert!(replacement.get("original").is_none(), "{replacement}");
+            assert!(replacement["rule"].as_str().is_some());
+            assert!(replacement["len"].as_u64().is_some());
+        }
+    }
+    assert!(saw_request);
+    assert!(audit.contains("\"dir\":\"response\""));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn pii_off_leaves_personal_data_unchanged() {
+    let engine = build_engine(Vault::ephemeral(), &pii_redact(false)).unwrap();
+    let (openai, openai_hits) = spawn_mock(b"data: [DONE]\n\n".to_vec(), true).await;
+    let (anthropic, _) = spawn_mock(b"{}".to_vec(), false).await;
+    let dir = temp_dir("audit-pii-off");
+    let state = AppState::new(
+        engine,
+        openai,
+        anthropic,
+        AuditLog::open(&dir.join("audit.jsonl")).unwrap(),
+        30,
+    )
+    .unwrap();
+    let proxy = spawn_proxy(state).await;
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .body(pii_request())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-symveil-redactions")
+            .and_then(|value| value.to_str().ok()),
+        Some("0")
+    );
+    let body = response.text().await.unwrap();
+    assert_eq!(body, "data: [DONE]\n\n");
+    let seen = openai_hits.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(content_of(&seen[0].body), PII_PROMPT);
+    let audit = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap_or_default();
+    assert!(audit.is_empty(), "{audit}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn pii_redact(on: bool) -> RedactSection {
+    RedactSection {
+        internal_domains: Vec::new(),
+        pii: PiiSection {
+            email: on,
+            phone: on,
+            personnummer: on,
+        },
+        ..RedactSection::default()
+    }
+}
+
+fn pii_request() -> String {
+    format!(
+        r#"{{"model":"gpt-test","stream":true,"messages":[{{"role":"user","content":"{}"}}]}}"#,
+        PII_PROMPT
+    )
+}
+
+fn content_of(body: &[u8]) -> String {
+    let value: serde_json::Value = serde_json::from_slice(body).unwrap();
+    value["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 async fn spawn_mock(body: Vec<u8>, sse: bool) -> (String, Arc<Mutex<Vec<Recorded>>>) {

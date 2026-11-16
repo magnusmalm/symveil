@@ -177,10 +177,11 @@ fn print_report(report: &IndexReport, verbose: bool) {
     if verbose {
         for entry in report.vault.iter() {
             match entry.category {
-                Category::Secret => {
-                    let rule = entry.rule.as_deref().unwrap_or("secret");
+                Category::Secret | Category::Pii => {
+                    let rule = entry.rule.as_deref().unwrap_or(entry.category.as_str());
                     println!(
-                        "  secret {rule} len={} {}",
+                        "  {} {rule} len={} {}",
+                        entry.category,
                         entry.original.len(),
                         entry.placeholder
                     );
@@ -256,9 +257,17 @@ async fn cmd_proxy(args: ProxyArgs) -> Result<()> {
     eprintln!("  openai      {}", cfg.proxy.openai_base);
     eprintln!("  anthropic   {}", cfg.proxy.anthropic_base);
     #[cfg(feature = "identifiers")]
-    eprintln!("  masking     secrets and identifiers");
+    if cfg.redact.pii.enabled() {
+        eprintln!("  masking     secrets, identifiers, and personal data");
+    } else {
+        eprintln!("  masking     secrets and identifiers");
+    }
     #[cfg(not(feature = "identifiers"))]
-    eprintln!("  masking     secrets");
+    if cfg.redact.pii.enabled() {
+        eprintln!("  masking     secrets and personal data");
+    } else {
+        eprintln!("  masking     secrets");
+    }
     eprintln!("  vault       {entries} entries ({})", vault_path.display());
     eprintln!("  audit       {}", audit_path.display());
     proxy::serve(listener, state).await
