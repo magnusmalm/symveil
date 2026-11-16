@@ -8,9 +8,7 @@ use crate::config::UserPattern;
 use crate::masker::{Boundary, Candidate, Masker, PRI_PATTERN, PRI_SECRET};
 use crate::vault::Vault;
 
-const SECRET_CAP: usize = 16_384;
 const VALUE_MIN: usize = 8;
-const VALUE_MAX: usize = 200;
 
 struct Builtin {
     name: &'static str,
@@ -76,14 +74,18 @@ const BUILTINS: &[Builtin] = &[
     },
     Builtin {
         name: "jwt",
-        pattern: r"\beyJ[A-Za-z0-9_-]{10,4000}\.[A-Za-z0-9_-]{10,4000}\.[A-Za-z0-9_-]{10,4000}\b",
+        // Optional `=` padding. The regex crate has no lookahead, and `\b` does
+        // not hold between `=` and the next non-word byte.
+        pattern: r"\beyJ[A-Za-z0-9_-]{10,4000}={0,2}\.[A-Za-z0-9_-]{10,4000}={0,2}\.[A-Za-z0-9_-]{10,4000}={0,2}",
         groups: &[],
         filter_low_signal: false,
     },
     Builtin {
         name: "url-password",
         // Password only. User and host stay so the model can still see the URL.
-        pattern: r"(?i)\b[a-z][a-z0-9+.-]*://[^:\s/@]*:([^:\s/@]{8,200})@",
+        // `:` may appear inside the password (`user:pass:word@host`). The
+        // required `@` keeps `http://localhost:8080` from matching.
+        pattern: r"(?i)\b[a-z][a-z0-9+.-]*://[^:\s/@]*:([^\s/@]{8,})@",
         groups: &[1],
         filter_low_signal: true,
     },
@@ -95,7 +97,8 @@ const BUILTINS: &[Builtin] = &[
     },
     Builtin {
         name: "generic-api-key",
-        pattern: r#"(?i)\b(?:api[_-]?key|apikey|secret|token|password)\b\s*[=:]\s*(?:'([^'\n]{8,200})'|"([^"\n]{8,200})")"#,
+        // The optional quote covers `"password": "…"` inside a string of JSON.
+        pattern: r#"(?i)\b(?:api[_-]?key|apikey|secret|token|password)\b["']?\s*[=:]\s*(?:'([^'\n]{8,})'|"([^"\n]{8,})")"#,
         groups: &[1, 2],
         filter_low_signal: true,
     },
@@ -106,7 +109,9 @@ const BUILTINS: &[Builtin] = &[
         pattern: concat!(
             r"(?m)^[ \t]*(?:export[ \t]+)?",
             r"[A-Z_][A-Z0-9_]*(?:_KEY|_SECRET|_TOKEN|_PASSWORD|_PASS)",
-            r#"[ \t]*=[ \t]*([^\s#'"]{8,200})"#
+            // Words may contain spaces. A `#` comment and quotes stay outside
+            // the value, so a quoted assignment is left to the quoted rule.
+            r#"[ \t]*=[ \t]*([^\r\n#'"]+(?:[ \t]+[^\r\n#'"]+)*)"#
         ),
         groups: &[1],
         filter_low_signal: true,
@@ -116,7 +121,7 @@ const BUILTINS: &[Builtin] = &[
         pattern: concat!(
             r"(?m)^[ \t]*(?:export[ \t]+)?",
             r"[A-Z_][A-Z0-9_]*(?:_KEY|_SECRET|_TOKEN|_PASSWORD|_PASS)",
-            r#"[ \t]*=[ \t]*(?:"([^"\r\n]{8,200})"|'([^'\r\n]{8,200})')"#
+            r#"[ \t]*=[ \t]*(?:"([^"\r\n]{8,})"|'([^'\r\n]{8,})')"#
         ),
         groups: &[1, 2],
         filter_low_signal: true,
@@ -177,7 +182,7 @@ impl SecretSet {
                 let Some((start, end, value)) = secret_span(&caps, &rule.groups) else {
                     continue;
                 };
-                if start == end || end - start > SECRET_CAP {
+                if start == end {
                     continue;
                 }
                 if rule.filter_low_signal && is_low_signal(&rule.name, value) {
@@ -213,7 +218,7 @@ fn secret_span<'a>(caps: &Captures<'a>, groups: &[usize]) -> Option<(usize, usiz
 /// All-digit URL passwords are kept: `user:12345678@host` is a credential,
 /// while `MAX_TOKEN=12345678` is a limit.
 fn is_low_signal(rule: &str, value: &str) -> bool {
-    if !(VALUE_MIN..=VALUE_MAX).contains(&value.len()) {
+    if value.chars().count() < VALUE_MIN {
         return true;
     }
     let mut chars = value.chars();
@@ -227,7 +232,10 @@ fn is_low_signal(rule: &str, value: &str) -> bool {
         return true;
     }
     let lower = value.to_ascii_lowercase();
-    if lower.starts_with('$') || (lower.starts_with('<') && lower.ends_with('>')) {
+    if lower.starts_with('<') && lower.ends_with('>') {
+        return true;
+    }
+    if is_env_reference(&lower) {
         return true;
     }
     const EXACT: &[&str] = &[
@@ -250,24 +258,32 @@ fn is_low_signal(rule: &str, value: &str) -> bool {
         "dummy",
         "redacted",
         "localhost",
+        "your_api_key_here",
+        "your-api-key-here",
+        "your_key_here",
+        "your-key-here",
+        "insert_key_here",
+        "insert-key-here",
+        "replace_me",
+        "replace-me",
     ];
-    if EXACT.contains(&lower.as_str()) {
+    EXACT.contains(&lower.as_str())
+}
+
+/// `${VAR}` and `$NAME` are references. `$upers3cret` is a password.
+fn is_env_reference(lower: &str) -> bool {
+    let Some(rest) = lower.strip_prefix('$') else {
+        return false;
+    };
+    if rest.starts_with('{') && lower.ends_with('}') && lower.len() > 3 {
         return true;
     }
-    const FRAGMENTS: &[&str] = &[
-        "changeme",
-        "placeholder",
-        "replace-me",
-        "replace_me",
-        "insert-key",
-        "insert_key",
-        "your-api",
-        "your_api",
-        "your-key",
-        "your_key",
-        "redacted",
-    ];
-    FRAGMENTS.iter().any(|fragment| lower.contains(fragment))
+    let mut chars = rest.chars();
+    match chars.next() {
+        Some(ch) if ch.is_ascii_uppercase() || ch == '_' => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
 }
 
 const HIGH_ENTROPY_MIN: usize = 32;
@@ -281,10 +297,7 @@ fn high_entropy_hits(text: &str) -> Vec<SecretHit> {
     let mut hits = Vec::new();
     for matched in HIGH_ENTROPY.find_iter(text) {
         let token = matched.as_str();
-        if token.len() < HIGH_ENTROPY_MIN
-            || token.len() > HIGH_ENTROPY_MAX
-            || token.len() > SECRET_CAP
-        {
+        if token.len() < HIGH_ENTROPY_MIN || token.len() > HIGH_ENTROPY_MAX {
             continue;
         }
         if is_hex_token(token) || is_digest_token(token) || is_uuid(token) {
@@ -419,13 +432,22 @@ impl Masker for SecretMasker {
             });
         }
         if self.high_entropy {
+            let named: Vec<(usize, usize)> = out.iter().map(|hit| (hit.start, hit.end)).collect();
             for hit in high_entropy_hits(text) {
+                // A named rule that overlaps this token already masks the
+                // secret. Keeping the earlier high-entropy span would drop
+                // that rule and leave the tail visible.
+                let overlaps = named
+                    .iter()
+                    .any(|&(start, end)| hit.start < end && start < hit.end);
+                if overlaps {
+                    continue;
+                }
                 out.push(Candidate {
                     start: hit.start,
                     end: hit.end,
                     category: Category::Secret,
                     rule: Some(hit.rule),
-                    // Named rules win when they cover the same span.
                     priority: PRI_PATTERN,
                     boundary: Boundary::None,
                 });
@@ -726,5 +748,91 @@ let request_id = "123e4567-e89b-12d3-a456-426614174000";
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].rule.as_deref(), Some("openai-api-key"));
         assert_eq!(enabled.restore_str(&out), project);
+    }
+
+    #[test]
+    fn long_passphrases_and_real_secrets_are_not_treated_as_placeholders() {
+        let long = format!("{}Zz", "Ab3xK9mQ".repeat(30));
+        assert!(long.chars().count() > 200, "{}", long.chars().count());
+        let quoted = format!("API_KEY=\"{long}\"\n");
+        let (out, _) = masked(&quoted);
+        assert!(!out.contains(&long), "{out}");
+        assert!(out.contains("API_KEY"), "{out}");
+
+        let unquoted = format!("DATABASE_PASSWORD={long}\n");
+        let (out, _) = masked(&unquoted);
+        assert!(!out.contains(&long), "{out}");
+        assert!(out.contains("DATABASE_PASSWORD="), "{out}");
+
+        let cjk: String = "密".repeat(40) + &"钥".repeat(40);
+        let input = format!("API_KEY=\"{cjk}\"\n");
+        let (out, _) = masked(&input);
+        assert!(!out.contains(&cjk), "{out}");
+
+        let phrase = "DATABASE_PASSWORD=correct horse battery staple\n";
+        let (out, _) = masked(phrase);
+        assert!(!out.contains("correct horse"), "{out}");
+        assert!(out.contains("DATABASE_PASSWORD="), "{out}");
+
+        for leaked in [
+            "API_KEY=changeme123",
+            "API_KEY=prod-changeme-rotated",
+            "DATABASE_PASSWORD=$upers3cret",
+        ] {
+            let (out, _) = masked(leaked);
+            assert!(!out.contains("changeme123"), "{leaked} -> {out}");
+            assert!(!out.contains("prod-changeme-rotated"), "{leaked} -> {out}");
+            assert!(!out.contains("$upers3cret"), "{leaked} -> {out}");
+        }
+
+        let (kept, rules) = masked("API_KEY=${OTHER_API_KEY}\nAPI_KEY=your_api_key_here\n");
+        assert!(rules.is_empty(), "{kept}");
+    }
+
+    #[test]
+    fn url_password_with_a_colon_and_padded_jwt_are_masked() {
+        let input = "postgres://app:notareal:password@db.example/app";
+        let (out, rules) = masked(input);
+        assert!(!out.contains("notareal:password"), "{out}");
+        assert!(out.contains("postgres://app:"), "{out}");
+        assert!(out.contains("@db.example/app"), "{out}");
+        assert_eq!(rules, vec!["url-password".to_string()]);
+
+        let padded = "eyJhbGciOiJub25lIn0=.eyJzdWIiOiIxMjM0NTY3ODkwIn0=.ZmFrZXNpZ25hdHVyZQ";
+        let (out, rules) = masked(padded);
+        assert!(!out.contains("eyJzdWIiOiIxMjM0NTY3ODkwIn0"), "{out}");
+        assert_eq!(rules, vec!["jwt".to_string()]);
+    }
+
+    #[test]
+    fn stringified_json_assignment_masks_the_value() {
+        let input = r#"{"password": "hunter2hunter2", "note": "keep"}"#;
+        let (out, rules) = masked(input);
+        assert!(!out.contains("hunter2hunter2"), "{out}");
+        assert!(out.contains("password"), "{out}");
+        assert!(out.contains("keep"), "{out}");
+        assert!(
+            rules.iter().any(|rule| rule == "generic-api-key"),
+            "{rules:?}"
+        );
+    }
+
+    #[test]
+    fn high_entropy_does_not_unmask_the_tail_of_a_named_secret() {
+        let mut enabled = engine(true);
+        let jwt = "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.ZmFrZXNpZ25hdHVyZQ";
+        let input = format!("AUTH_TOKEN={jwt}");
+        let (out, hits) = enabled.redact_str(&input).unwrap();
+        assert!(!out.contains("eyJzdWIiOiIxIn0"), "{out}");
+        assert!(out.contains("AUTH_TOKEN="), "{out}");
+        assert!(!hits.is_empty());
+        assert_eq!(enabled.restore_str(&out), input);
+
+        let mixed = "DATABASE_PASSWORD=Ab3xK9mQ2pL7vN4sT8wY1zC6dE0fGh:hunter2hunter2";
+        let (out, _) = enabled.redact_str(mixed).unwrap();
+        assert!(!out.contains("hunter2hunter2"), "{out}");
+        assert!(!out.contains("Ab3xK9mQ2pL7vN4sT8wY1zC6dE0fGh"), "{out}");
+        assert!(out.contains("DATABASE_PASSWORD="), "{out}");
+        assert_eq!(enabled.restore_str(&out), mixed);
     }
 }
