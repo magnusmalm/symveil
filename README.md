@@ -178,7 +178,7 @@ regex = '\bacme_live_[A-Za-z0-9]{16,}\b'
 action = "warn"
 ```
 
-`action` is `redact`, `warn`, or `block`. Leave it out to redact. An explicit action on a `[[redact.secrets]]` rule wins over `[redact.builtin]` and `[redact.category]` when the rule name matches. `mode = "observe"` forces warn for every match, including rules set to block, so a repo can be tried before anything is masked or refused.
+`action` is `redact`, `warn`, or `block`. Leave it out to redact. An explicit action on a `[[redact.secrets]]` rule wins over `[redact.builtin]` and `[redact.category]` when the rule name matches. A `block` match blocks the request even when a wider `warn` or `redact` span covers the same bytes. `mode = "observe"` forces warn for every match, including rules set to block, so a repo can be tried before anything is masked or refused.
 
 Builtin detector names: `aws-access-key-id`, `github-pat`, `github-fine-grained-pat`, `slack-token`, `google-api-key`, `stripe-live-secret`, `private-key`, `generic-api-key`, `ipv4`, `ipv6`, `internal-hostname`. Category names: `secret`, `ip`, `hostname`. An unknown action, mode, category, or builtin name fails at startup and names the values that are accepted.
 

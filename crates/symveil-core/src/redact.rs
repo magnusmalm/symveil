@@ -211,6 +211,12 @@ impl Engine {
                 self.consider(text, candidate, &blocked, &mut spans);
             }
         }
+        // A block match has to win even when a wider warn or redact span
+        // covers the same bytes. Otherwise the secret is sent upstream.
+        if spans.iter().any(|span| span.action == Action::Block) {
+            spans.retain(|span| span.action == Action::Block);
+            return spans;
+        }
         select_spans(spans)
     }
 
@@ -728,6 +734,53 @@ mod tests {
         assert_eq!(hits[0].action, Action::Warn);
         assert_eq!(hits[0].rule.as_deref(), Some("aws-access-key-id"));
         assert!(engine.placeholder("AKIAIOSFODNN7EXAMPLE").is_none());
+    }
+
+    #[test]
+    fn block_wins_when_a_wider_span_covers_the_same_bytes() {
+        let mut engine = engine(RedactSection {
+            internal_domains: Vec::new(),
+            category_actions: HashMap::from([("secret".into(), Action::Warn)]),
+            builtin_actions: HashMap::from([("aws-access-key-id".into(), Action::Block)]),
+            ..RedactSection::default()
+        });
+        let input = "api_key = \"AKIAIOSFODNN7EXAMPLE\"";
+        let (out, hits) = engine.redact_str(input).unwrap();
+        assert_eq!(out, input);
+        assert!(contains_block(&hits), "{hits:?}");
+        assert!(hits.iter().any(|hit| {
+            hit.rule.as_deref() == Some("aws-access-key-id") && hit.action == Action::Block
+        }));
+        assert!(engine.placeholder("AKIAIOSFODNN7EXAMPLE").is_none());
+
+        let body = serde_json::to_vec(&serde_json::json!({"content": input})).unwrap();
+        let (bytes, hits) = engine.redact_bytes(&body).unwrap();
+        assert_eq!(bytes, body);
+        assert!(contains_block(&hits));
+        let rendered = String::from_utf8_lossy(&bytes);
+        assert!(rendered.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(!rendered.contains("@@sv:"));
+
+        let mut explicit = Engine::new(
+            Vault::ephemeral(),
+            &RedactSection {
+                internal_domains: Vec::new(),
+                secrets: vec![SecretRule {
+                    name: "also-aws".into(),
+                    regex: r"\bAKIA[0-9A-Z]{16}\b".into(),
+                    action: Some(Action::Block),
+                }],
+                ..RedactSection::default()
+            },
+        )
+        .unwrap();
+        let bare = "key AKIAIOSFODNN7EXAMPLE";
+        let (out, hits) = explicit.redact_str(bare).unwrap();
+        assert_eq!(out, bare);
+        assert!(hits
+            .iter()
+            .any(|hit| { hit.rule.as_deref() == Some("also-aws") && hit.action == Action::Block }));
+        assert!(explicit.placeholder("AKIAIOSFODNN7EXAMPLE").is_none());
     }
 
     #[test]
