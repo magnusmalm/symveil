@@ -287,6 +287,10 @@ fn stream_body(
                     }
                 }
                 Err(err) => {
+                    let tail = restorer.finish();
+                    if !tail.is_empty() {
+                        yield Ok(Bytes::from(tail));
+                    }
                     log_restored(&audit, &path, restorer.restored());
                     yield Err(std::io::Error::other(err));
                     return;
@@ -394,6 +398,9 @@ fn json_response(status: StatusCode, body: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::category::Category;
+    use crate::vault::Vault;
+    use futures::StreamExt;
 
     #[test]
     fn classifies_agent_paths() {
@@ -404,6 +411,56 @@ mod tests {
         assert_eq!(classify("/v1/responses"), Route::OpenAi);
         assert_eq!(classify("/v1/models"), Route::OpenAi);
         assert_eq!(classify("/"), Route::Unknown);
+    }
+
+    #[tokio::test]
+    async fn upstream_error_flushes_a_held_sse_event() {
+        let mut vault = Vault::ephemeral();
+        let secret = "AKIAIOSFODNN7EXAMPLE";
+        let placeholder = vault.assign(secret, Category::Secret, None).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "symveil-stream-err-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let audit = AuditLog::open(&dir.join("audit.jsonl")).unwrap();
+        let chunk = format!("data: {{\"text\":\"{placeholder}\"}}\n");
+        let err = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap()
+            .get("http://127.0.0.1:1")
+            .send()
+            .await
+            .expect_err("nothing should accept port 1");
+        let upstream = futures::stream::iter(vec![Ok(Bytes::from(chunk)), Err(err)]);
+        let body = stream_body(
+            upstream,
+            vault.restore_map(),
+            false,
+            Arc::new(Mutex::new(audit)),
+            "/v1/responses".into(),
+        );
+        let mut stream = body.into_data_stream();
+        let mut collected = String::new();
+        let mut saw_err = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(bytes) => collected.push_str(&String::from_utf8_lossy(&bytes)),
+                Err(_) => {
+                    saw_err = true;
+                    break;
+                }
+            }
+        }
+        assert!(saw_err);
+        assert!(collected.contains(secret), "{collected}");
+        assert!(!collected.contains("@@sv:"), "{collected}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

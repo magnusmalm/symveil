@@ -367,7 +367,10 @@ impl SseRestorer {
                     let buffered = std::mem::take(&mut self.buffer);
                     return self.raw_mut().push(&buffered);
                 }
-                Probe::Sse => self.mode = Mode::Sse,
+                Probe::Sse => {
+                    self.mode = Mode::Sse;
+                    strip_leading_bom(&mut self.buffer);
+                }
             }
         }
         self.drain_events()
@@ -893,19 +896,43 @@ fn json_u64(value: &Value, field: &str) -> Option<u64> {
     value.get(field).and_then(Value::as_u64)
 }
 
+const SSE_FIELDS: &[&[u8]] = &[b"data:", b"event:", b"id:", b"retry:"];
+const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+
 fn probe(buf: &[u8]) -> Probe {
     let trimmed = trim_ascii_start(buf);
     if trimmed.is_empty() {
         return Probe::NeedMore;
     }
-    if trimmed.starts_with(b"data:") || trimmed.starts_with(b"event:") || trimmed.starts_with(b":")
-    {
+    if trimmed.starts_with(UTF8_BOM) {
+        return probe_fields(&trimmed[UTF8_BOM.len()..]);
+    }
+    // A one-byte chunk of the BOM must not be classified as a raw body.
+    if UTF8_BOM.starts_with(trimmed) {
+        return Probe::NeedMore;
+    }
+    probe_fields(trimmed)
+}
+
+fn probe_fields(trimmed: &[u8]) -> Probe {
+    if trimmed.is_empty() {
+        return Probe::NeedMore;
+    }
+    if trimmed.starts_with(b":") || SSE_FIELDS.iter().any(|field| trimmed.starts_with(field)) {
         return Probe::Sse;
     }
-    if b"data:".starts_with(trimmed) || b"event:".starts_with(trimmed) {
+    if SSE_FIELDS.iter().any(|field| field.starts_with(trimmed)) {
         return Probe::NeedMore;
     }
     Probe::Raw
+}
+
+fn strip_leading_bom(buf: &mut Vec<u8>) {
+    let skipped = buf.len() - trim_ascii_start(buf).len();
+    let rest = &buf[skipped..];
+    if rest.starts_with(UTF8_BOM) {
+        buf.drain(skipped..skipped + 3);
+    }
 }
 
 fn trim_ascii_start(buf: &[u8]) -> &[u8] {
@@ -916,21 +943,34 @@ fn trim_ascii_start(buf: &[u8]) -> &[u8] {
     &buf[index..]
 }
 
+/// A blank line ends an event. Line endings are `\n`, `\r\n`, or a lone `\r`.
+/// A trailing `\r` with no following byte waits, because it may be the start
+/// of `\r\n`.
 fn find_event_sep(buf: &[u8]) -> Option<(usize, usize)> {
     let mut index = 0;
+    let mut line_start = 0;
     while index < buf.len() {
-        if buf[index] == b'\n' && index + 1 < buf.len() && buf[index + 1] == b'\n' {
-            return Some((index, 2));
+        if buf[index] == b'\r' && index + 1 == buf.len() {
+            return None;
         }
-        if buf[index] == b'\r'
-            && index + 3 < buf.len()
-            && buf[index + 1] == b'\n'
-            && buf[index + 2] == b'\r'
-            && buf[index + 3] == b'\n'
-        {
-            return Some((index, 4));
+        let break_len = if buf[index] == b'\n' {
+            1
+        } else if buf[index] == b'\r' && buf.get(index + 1) == Some(&b'\n') {
+            2
+        } else if buf[index] == b'\r' {
+            1
+        } else {
+            0
+        };
+        if break_len == 0 {
+            index += 1;
+            continue;
         }
-        index += 1;
+        if index == line_start {
+            return Some((index, break_len));
+        }
+        index += break_len;
+        line_start = index;
     }
     None
 }
@@ -939,8 +979,7 @@ fn parse_event(event: &str) -> ParsedEvent {
     let mut event_name = None;
     let mut others = Vec::new();
     let mut data_lines = Vec::new();
-    for line in event.split('\n') {
-        let line = line.trim_end_matches('\r');
+    for line in event.split(['\n', '\r']) {
         if line.is_empty() {
             continue;
         }
@@ -1111,6 +1150,34 @@ mod tests {
     fn json_escape_quotes_and_newlines() {
         assert_eq!(json_escape("a\"b\\c"), r#"a\"b\\c"#);
         assert_eq!(json_escape("line\n"), r#"line\n"#);
+    }
+
+    #[test]
+    fn sse_framing_outside_data_and_event_still_restores() {
+        let secret = "AKIAIOSFODNN7EXAMPLE";
+        let mut vault = Vault::ephemeral();
+        let placeholder = vault
+            .assign(secret, Category::Secret, Some("aws-access-key-id".into()))
+            .unwrap();
+        let map = vault.restore_map();
+        let logical = format!(r#"{{"cmd":"echo {placeholder}"}}"#);
+        let (left, right) = logical.split_at(logical.len() / 2);
+        let frames = chat_tool_sse(&[(left, right)]);
+        for prefix in ["id: 1\n", "retry: 3000\n\n"] {
+            let sse = format!("{prefix}{frames}");
+            let (body, _) = feed(&map, &sse, 1);
+            assert!(!body.contains("@@sv:"), "prefix {prefix:?}: {body}");
+            assert!(body.contains(secret), "prefix {prefix:?}: {body}");
+        }
+        let bommed = format!("\u{feff}{frames}");
+        let (body, _) = feed(&map, &bommed, 1);
+        assert!(!body.contains("@@sv:"), "{body}");
+        assert!(body.contains(secret), "{body}");
+
+        let cr = frames.replace('\n', "\r");
+        let (body, _) = feed(&map, &cr, 1);
+        assert!(!body.contains("@@sv:"), "{body}");
+        assert!(body.contains(secret), "{body}");
     }
 
     #[test]
