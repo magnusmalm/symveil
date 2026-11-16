@@ -56,14 +56,14 @@ impl Masker for PiiMasker {
     }
 }
 
-fn candidate(start: usize, end: usize, rule: &str, priority: u8) -> Candidate {
+fn candidate(start: usize, end: usize, rule: &str, priority: u8, boundary: Boundary) -> Candidate {
     Candidate {
         start,
         end,
         category: Category::Pii,
         rule: Some(rule.to_string()),
         priority,
-        boundary: Boundary::Ident,
+        boundary,
     }
 }
 
@@ -84,7 +84,13 @@ fn collect_personnummer(text: &str, out: &mut Vec<Candidate>) {
         };
         // Higher than a phone so a 10-digit mobile that also passes Luhn is
         // recorded as an identity number.
-        out.push(candidate(matched.start(), matched.end(), rule, PRI_SECRET));
+        out.push(candidate(
+            matched.start(),
+            matched.end(),
+            rule,
+            PRI_SECRET,
+            Boundary::Ident,
+        ));
     }
 }
 
@@ -200,7 +206,7 @@ fn collect_phones(text: &str, out: &mut Vec<Candidate>) {
         if matches!(ch, '+' | '0' | '(') {
             if let Some((end, rule)) = phone_at(text, index) {
                 if separated_edge(text, index, end) {
-                    out.push(candidate(index, end, rule, PRI_PATTERN));
+                    out.push(candidate(index, end, rule, PRI_PATTERN, Boundary::Ident));
                 }
                 index = end;
                 continue;
@@ -216,16 +222,28 @@ fn phone_at(text: &str, start: usize) -> Option<(usize, &'static str)> {
     if !left_separated(text, start) {
         return None;
     }
+    let chunks = take_chunks(text, start)?;
     let bytes = text.as_bytes();
-    let taken = take_number(text, start)?;
+    // Longest prefix that is a real number. An extra group (`070-123 45 67
+    // 2024`) used to fail the whole match and send the phone upstream.
+    for len in (1..=chunks.len()).rev() {
+        let taken = taken_from(start, &chunks[..len]);
+        if let Some(rule) = classify_phone(text, bytes, start, &taken) {
+            return Some((taken.end, rule));
+        }
+    }
+    None
+}
+
+fn classify_phone(text: &str, bytes: &[u8], start: usize, taken: &Taken) -> Option<&'static str> {
     if bytes.get(start) == Some(&b'+') {
-        return e164_ok(&taken).then_some((taken.end, "phone-e164"));
+        return e164_ok(taken).then_some("phone-e164");
     }
     if bytes.get(start) == Some(&b'0') && bytes.get(start + 1) == Some(&b'0') {
-        return idd_ok(&taken).then_some((taken.end, "phone-e164"));
+        return idd_ok(taken).then_some("phone-e164");
     }
     if starts_swedish(bytes, start) {
-        return swedish_ok(text, &taken).then_some((taken.end, "phone-se"));
+        return swedish_ok(text, taken).then_some("phone-se");
     }
     None
 }
@@ -255,7 +273,13 @@ struct Group {
     continues: bool,
 }
 
-fn take_number(text: &str, start: usize) -> Option<Taken> {
+struct Chunk {
+    end: usize,
+    values: Vec<u8>,
+    counted_sep: bool,
+}
+
+fn take_chunks(text: &str, start: usize) -> Option<Vec<Chunk>> {
     let bytes = text.as_bytes();
     let mut index = start;
     if bytes.get(index) == Some(&b'+') {
@@ -275,37 +299,51 @@ fn take_number(text: &str, start: usize) -> Option<Taken> {
         if !compact {
             return None;
         }
-        return Some(Taken {
-            start,
+        return Some(vec![Chunk {
             end: first.end,
-            digits: first.values,
-            seps: 0,
-        });
+            values: first.values,
+            counted_sep: false,
+        }]);
     }
-    let mut digits = first.values;
+    let mut chunks = vec![Chunk {
+        end: first.end,
+        values: first.values,
+        counted_sep: false,
+    }];
     index = first.end;
-    let mut seps = 0u32;
+    let mut digit_len = chunks[0].values.len();
     while let Some((counted_sep, group)) = next_group(bytes, index) {
         if !grouped_len_ok(group.values.len(), group.continues)
-            || digits.len() + group.values.len() > 18
+            || digit_len + group.values.len() > 18
         {
             break;
         }
-        if counted_sep {
+        digit_len += group.values.len();
+        index = group.end;
+        chunks.push(Chunk {
+            end: group.end,
+            values: group.values,
+            counted_sep,
+        });
+    }
+    Some(chunks)
+}
+
+fn taken_from(start: usize, chunks: &[Chunk]) -> Taken {
+    let mut digits = Vec::new();
+    let mut seps = 0u32;
+    for chunk in chunks {
+        if chunk.counted_sep {
             seps += 1;
         }
-        index = group.end;
-        digits.extend(group.values);
+        digits.extend(&chunk.values);
     }
-    if digits.is_empty() {
-        return None;
-    }
-    Some(Taken {
+    Taken {
         start,
-        end: index,
+        end: chunks.last().map(|chunk| chunk.end).unwrap_or(start),
         digits,
         seps,
-    })
+    }
 }
 
 /// Grouped numbers use chunks of at most 4 digits (`+46 70 000 00 00`).
@@ -447,11 +485,32 @@ fn collect_emails(text: &str, out: &mut Vec<Candidate>) {
         }
         let start = matched.start();
         let end = matched.end();
-        if !ident_edge(text, start, end) || scp_remote(text, end) {
+        if !email_edge(text, start, end) || scp_remote(text, end) {
             continue;
         }
-        out.push(candidate(start, end, "email", PRI_PATTERN));
+        // Boundary::None: the edge check above already ran. Ident boundaries
+        // would drop `ada@example.com2` after the pattern stopped at the TLD.
+        out.push(candidate(start, end, "email", PRI_PATTERN, Boundary::None));
     }
+}
+
+fn email_edge(text: &str, start: usize, end: usize) -> bool {
+    if end > text.len() || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        return false;
+    }
+    let left_ok = start == 0
+        || !text[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+    // A following letter would still be part of a label. A digit or `_` is
+    // not, and must not throw the address away.
+    let right_ok = end == text.len()
+        || !text[end..]
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic());
+    left_ok && right_ok
 }
 
 /// `git@github.com:org/repo` is an ssh remote. `user@example.com:8080` is not:
@@ -465,12 +524,6 @@ fn scp_remote(text: &str, end: usize) -> bool {
         chars.next(),
         Some(ch) if ch.is_ascii_alphabetic() || ch == '/' || ch == '~'
     )
-}
-
-fn ident_edge(text: &str, start: usize, end: usize) -> bool {
-    edge_ok(text, start, end, |ch| {
-        ch.is_ascii_alphanumeric() || ch == '_'
-    })
 }
 
 /// Digit runs glued to an identifier, a hyphen, or a plus are order numbers
@@ -663,6 +716,45 @@ mod tests {
         assert_rules("08-123 456 78", &["phone-se"]);
         assert_rules("08 123 456 78", &["phone-se"]);
         assert_rules("031-12 34 56", &["phone-se"]);
+    }
+
+    #[test]
+    fn grouped_phone_keeps_a_following_number() {
+        for sample in [
+            "call 070-123 45 67 2024 please",
+            "08-123 456 78 2024",
+            "+46 70 123 45 67 898989",
+        ] {
+            let mut engine = all_on();
+            let (out, hits) = engine.redact_str(sample).unwrap();
+            assert_eq!(hits.len(), 1, "{sample} -> {out}");
+            assert!(!out.contains("123 45 67"), "{out}");
+            assert!(!out.contains("123 456 78"), "{out}");
+            assert!(!out.contains("70 123 45 67"), "{out}");
+            assert!(
+                out.contains("2024") || out.contains("898989"),
+                "{sample} -> {out}"
+            );
+            assert_eq!(engine.restore_str(&out), sample);
+        }
+    }
+
+    #[test]
+    fn email_with_a_trailing_digit_is_masked() {
+        let mut engine = all_on();
+        let input = "write ada@example.com2 today";
+        let (out, hits) = engine.redact_str(input).unwrap();
+        assert_eq!(hits.len(), 1, "{out}");
+        assert_eq!(hits[0].rule.as_deref(), Some("email"));
+        assert!(!out.contains("ada@example.com"), "{out}");
+        assert!(out.contains('2'), "{out}");
+        assert_eq!(engine.restore_str(&out), input);
+    }
+
+    #[test]
+    fn published_personnummer_vector_is_masked() {
+        assert_rules("811228-9874", &["personnummer"]);
+        assert_rules("811228-9875", &[]);
     }
 
     #[test]
