@@ -51,7 +51,11 @@ impl Engine {
         let allow: HashSet<String> = redact.allow.iter().cloned().collect();
         let deny: HashSet<String> = redact.deny.iter().cloned().collect();
         let mut maskers: Vec<Box<dyn Masker>> = Vec::with_capacity(2 + extra.len());
-        maskers.push(Box::new(SecretMasker::compile(&redact.secrets, &vault)?));
+        maskers.push(Box::new(SecretMasker::compile(
+            &redact.secrets,
+            &vault,
+            redact.high_entropy,
+        )?));
         maskers.push(Box::new(NetworkMasker::compile(&redact.internal_domains)?));
         maskers.extend(extra);
         Ok(Self {
