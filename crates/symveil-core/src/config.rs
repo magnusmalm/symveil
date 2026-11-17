@@ -276,6 +276,15 @@ impl RedactSection {
                 );
             }
         }
+        for rule in &self.secrets {
+            if known.iter().any(|builtin| *builtin == rule.name) {
+                anyhow::bail!(
+                    "secret rule `{}` reuses the builtin rule name `{}`. Rename it. A custom rule cannot use a builtin detector name; set that detector's action in [redact.builtin].",
+                    rule.name,
+                    rule.name
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -532,6 +541,41 @@ mod tests {
         let message = format!("{err:#}");
         assert!(message.contains("unknown action `drop`"), "{message}");
         assert!(message.contains(&path.display().to_string()), "{message}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_custom_rule_cannot_reuse_a_builtin_name() {
+        let dir = std::env::temp_dir().join(format!(
+            "symveil-builtin-name-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".symveil.toml");
+        std::fs::write(
+            &path,
+            "[[redact.secrets]]\nname = \"aws-access-key-id\"\nregex = 'AKIA[0-9A-Z]{16}'\naction = \"warn\"\n",
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("aws-access-key-id"), "{message}");
+        assert!(message.contains("Rename"), "{message}");
+        assert!(message.contains(&path.display().to_string()), "{message}");
+
+        std::fs::write(
+            &path,
+            "[[redact.secrets]]\nname = \"acme-factory-token\"\nregex = '\\bacme_live_[A-Za-z0-9]{16,}\\b'\naction = \"warn\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.redact.secrets.len(), 1);
+        assert_eq!(cfg.redact.secrets[0].name, "acme-factory-token");
+        assert_eq!(cfg.redact.secrets[0].action, Some(Action::Warn));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

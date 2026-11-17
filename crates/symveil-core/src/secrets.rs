@@ -52,6 +52,13 @@ impl SecretSet {
             rules.push(((*name).to_string(), regex));
         }
         for pattern in user {
+            if BUILTINS.iter().any(|(name, _)| *name == pattern.name) {
+                anyhow::bail!(
+                    "secret rule `{}` reuses the builtin rule name `{}`. Rename it. A custom rule cannot use a builtin detector name; set that detector's action in [redact.builtin].",
+                    pattern.name,
+                    pattern.name
+                );
+            }
             if pattern.regex.is_empty() {
                 anyhow::bail!("secret rule '{}' has an empty regex", pattern.name);
             }
