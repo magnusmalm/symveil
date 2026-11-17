@@ -1,4 +1,3 @@
-use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -63,14 +62,10 @@ impl AuditLog {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("create {}", parent.display()))?;
+                crate::perms::ensure_private_dir(parent)?;
             }
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
+        let file = crate::perms::open_append_private(path)
             .with_context(|| format!("open audit log {}", path.display()))?;
         Ok(Self {
             writer: Some(std::io::BufWriter::new(file)),
@@ -181,5 +176,52 @@ mod tests {
         assert!(secret_json.contains("aws-access-key-id"));
         let ident_json = serde_json::to_string(&replacement_from_hit(&ident)).unwrap();
         assert!(ident_json.contains("aurora_rcc_enable_pll"));
+    }
+
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "symveil-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    fn mode_bits(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_audit_log_is_owner_rw() {
+        let root = temp_dir("audit-mode");
+        let path = root.join(".symveil").join("audit.jsonl");
+        let log = AuditLog::open(&path).unwrap();
+        drop(log);
+        assert_eq!(mode_bits(&root.join(".symveil")), 0o700);
+        assert_eq!(mode_bits(&path), 0o600);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_loose_audit_log_is_not_chmodded() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("audit-loose");
+        let path = dir.join("audit.jsonl");
+        std::fs::write(&path, b"").unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&path, perms).unwrap();
+        let log = AuditLog::open(&path).unwrap();
+        drop(log);
+        assert_eq!(mode_bits(&path), 0o644);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

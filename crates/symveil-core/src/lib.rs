@@ -7,6 +7,10 @@
 
 #![forbid(unsafe_code)]
 
+mod keystore;
+mod perms;
+mod seal;
+
 pub mod audit;
 pub mod category;
 pub mod config;

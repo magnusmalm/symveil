@@ -232,6 +232,7 @@ async fn cmd_proxy(args: ProxyArgs) -> Result<()> {
     let vault_path = resolve_path(&root, &cfg.proxy.vault);
     let vault = open_vault(&root, &cfg)?;
     let entries = vault.len();
+    let key_line = vault.key_location_line();
     let mut engine = build_engine(vault, &cfg.redact)?;
     engine.save_if_dirty()?;
 
@@ -259,8 +260,13 @@ async fn cmd_proxy(args: ProxyArgs) -> Result<()> {
     eprintln!("  masking     secrets and identifiers");
     #[cfg(not(feature = "identifiers"))]
     eprintln!("  masking     secrets");
-    eprintln!("  vault       {entries} entries ({})", vault_path.display());
+    eprintln!(
+        "  vault       {entries} entries ({}, encrypted at rest)",
+        vault_path.display()
+    );
+    eprintln!("  vault key   {key_line}");
     eprintln!("  audit       {}", audit_path.display());
+    let _ = io::stderr().flush();
     proxy::serve(listener, state).await
 }
 

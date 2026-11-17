@@ -6,7 +6,7 @@ Local redaction proxy so cloud coding agents never see your secrets.
 
 SymVeil is a local proxy that sits between a coding agent and a cloud model. This tree is the free tier: it masks secrets before a request leaves the machine and restores them in the response, including streamed server-sent events.
 
-The vault and the audit log stay on the machine. Upstream sees placeholders of the form `@@sv:0123abcd@@` instead of the secret.
+The vault and the audit log stay on the machine. The vault file is encrypted; the key sits next to it. Upstream sees placeholders of the form `@@sv:0123abcd@@` instead of the secret.
 
 The free tier masks secrets. Pro identifier and code-name masking is at [symveil.dev](https://symveil.dev).
 
@@ -163,7 +163,7 @@ name = "acme-factory-token"
 regex = '\bacme_live_[A-Za-z0-9]{16,}\b'
 ```
 
-`.symveil/` is gitignored. The vault is the reverse map, including secrets. Do not copy it off the machine.
+`.symveil/` is gitignored. The vault is the reverse map. SymVeil encrypts it with AES-256-GCM. The key is stored in the OS keychain (macOS Keychain, Linux Secret Service, or Windows Credential Manager), under the service name `symveil`. An existing `.symveil/vault.key` is moved into that keychain on open and then removed. When no keychain can be opened, SymVeil falls back to `.symveil/vault.key` (mode `0600`; the directory is `0700` when SymVeil creates it) and prints a warning that a copy of the directory can decrypt the vault. A locked keychain is not that fallback: startup fails and leaves the vault unchanged. The audit log does not contain secret values. It is mode `0600` and is not encrypted. Encryption does not hide the vault from a process running as the same user, or from root. Do not copy `.symveil/` off the machine. Details: [docs/design/vault-at-rest.md](docs/design/vault-at-rest.md).
 
 ## Development
 
