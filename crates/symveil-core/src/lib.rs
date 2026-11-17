@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+mod keystore;
 mod perms;
 mod seal;
 

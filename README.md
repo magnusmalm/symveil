@@ -163,7 +163,7 @@ name = "acme-factory-token"
 regex = '\bacme_live_[A-Za-z0-9]{16,}\b'
 ```
 
-`.symveil/` is gitignored. The vault is the reverse map. SymVeil encrypts it with AES-256-GCM and stores the key in `.symveil/vault.key` (mode `0600`; the directory is `0700` when SymVeil creates it). The audit log does not contain secret values. It is mode `0600` and is not encrypted. Encryption does not hide the vault from a process running as the same user, and a copy of the whole `.symveil/` directory includes the key. Do not copy that directory off the machine. Details: [docs/design/vault-at-rest.md](docs/design/vault-at-rest.md).
+`.symveil/` is gitignored. The vault is the reverse map. SymVeil encrypts it with AES-256-GCM. The key is stored in the OS keychain (macOS Keychain, Linux Secret Service, or Windows Credential Manager), under the service name `symveil`. An existing `.symveil/vault.key` is moved into that keychain on open and then removed. When no keychain can be opened, SymVeil falls back to `.symveil/vault.key` (mode `0600`; the directory is `0700` when SymVeil creates it) and prints a warning that a copy of the directory can decrypt the vault. A locked keychain is not that fallback: startup fails and leaves the vault unchanged. The audit log does not contain secret values. It is mode `0600` and is not encrypted. Encryption does not hide the vault from a process running as the same user, or from root. Do not copy `.symveil/` off the machine. Details: [docs/design/vault-at-rest.md](docs/design/vault-at-rest.md).
 
 ## Development
 

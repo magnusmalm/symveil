@@ -14,6 +14,7 @@ axum = "0.7"
 base64 = "0.22"
 bytes = "1"
 futures = "0.3"
+keyring = "4.2"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }

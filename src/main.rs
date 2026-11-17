@@ -12,7 +12,7 @@ use symveil::build_engine;
 use symveil::category::Category;
 use symveil::config::{resolve_path, Config};
 use symveil::proxy::{self, AppState};
-use symveil::vault::{vault_key_path, Vault};
+use symveil::vault::Vault;
 
 #[cfg(feature = "identifiers")]
 use symveil::{index_repo, IndexOptions, IndexReport};
@@ -232,6 +232,7 @@ async fn cmd_proxy(args: ProxyArgs) -> Result<()> {
     let vault_path = resolve_path(&root, &cfg.proxy.vault);
     let vault = open_vault(&root, &cfg)?;
     let entries = vault.len();
+    let key_line = vault.key_location_line();
     let mut engine = build_engine(vault, &cfg.redact)?;
     engine.save_if_dirty()?;
 
@@ -263,7 +264,7 @@ async fn cmd_proxy(args: ProxyArgs) -> Result<()> {
         "  vault       {entries} entries ({}, encrypted at rest)",
         vault_path.display()
     );
-    eprintln!("  vault key   {}", vault_key_path(&vault_path).display());
+    eprintln!("  vault key   {key_line}");
     eprintln!("  audit       {}", audit_path.display());
     let _ = io::stderr().flush();
     proxy::serve(listener, state).await

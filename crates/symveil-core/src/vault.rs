@@ -1,7 +1,8 @@
 //! Reverse map from original values to placeholders.
 //!
-//! On disk the map is an AES-256-GCM payload (version 2). The key is a sibling
-//! file, not part of the ciphertext. See `docs/design/vault-at-rest.md`.
+//! On disk the map is an AES-256-GCM payload (version 2). The key lives in the
+//! OS keychain. `.symveil/vault.key` is only the fallback when no keychain can
+//! be opened. See `docs/design/vault-at-rest.md`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -13,6 +14,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::category::Category;
+use crate::keystore::{self, Backend, KeyFailure, KeyHome, SERVICE};
 use crate::perms;
 use crate::seal;
 
@@ -40,6 +42,8 @@ struct VaultFile {
 pub struct Vault {
     path: Option<PathBuf>,
     key: Option<Zeroizing<[u8; 32]>>,
+    key_home: Option<KeyHome>,
+    backend: Backend,
     entries: BTreeMap<String, Entry>,
     reverse: HashMap<String, String>,
     dirty: bool,
@@ -57,6 +61,8 @@ impl Vault {
         Self {
             path: None,
             key: None,
+            key_home: None,
+            backend: default_backend(),
             entries: BTreeMap::new(),
             reverse: HashMap::new(),
             dirty: false,
@@ -64,22 +70,47 @@ impl Vault {
     }
 
     pub fn create(path: PathBuf) -> Self {
+        Self::create_with(path, default_backend())
+    }
+
+    fn create_with(path: PathBuf, backend: Backend) -> Self {
         Self {
             path: Some(path),
             key: None,
+            key_home: None,
+            backend,
             entries: BTreeMap::new(),
             reverse: HashMap::new(),
             dirty: false,
         }
     }
 
+    /// Where the key for this vault is stored, once one has been loaded or created.
+    ///
+    /// A vault that has not been saved yet reports where the key will go. That
+    /// probe is what prints the file-fallback warning before the proxy listens.
+    pub fn key_location_line(&self) -> String {
+        if let Some(home) = &self.key_home {
+            return home.line();
+        }
+        if let Some(path) = &self.path {
+            return planned_location(path, &self.backend);
+        }
+        "not stored".to_string()
+    }
+
     /// Load a vault from `path`.
     ///
     /// A version 1 plaintext file is encrypted in place before this returns.
-    /// A version 2 file is decrypted with the sibling key from [`vault_key_path`].
+    /// A version 2 file is decrypted with the key from the OS keychain, or from
+    /// the sibling file [`vault_key_path`] when no keychain can be opened.
     /// If that key is missing or wrong, or the file cannot be authenticated, this
     /// returns an error and does not modify the vault file.
     pub fn load(path: &Path) -> Result<Self> {
+        Self::load_with(path, default_backend())
+    }
+
+    fn load_with(path: &Path, backend: Backend) -> Result<Self> {
         let bytes = fs::read(path).with_context(|| format!("read vault {}", path.display()))?;
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() && parent.exists() {
@@ -88,8 +119,8 @@ impl Vault {
         }
         perms::warn_if_loose_file(path);
         match seal::inspect(&bytes) {
-            Ok(seal::Inspected::Plaintext) => load_plaintext(path, &bytes),
-            Ok(seal::Inspected::Sealed(envelope)) => load_sealed(path, &envelope),
+            Ok(seal::Inspected::Plaintext) => load_plaintext(path, &bytes, backend),
+            Ok(seal::Inspected::Sealed(envelope)) => load_sealed(path, &envelope, backend),
             Err(err) => Err(refused_error(path, &seal_reason(&err))),
         }
     }
@@ -217,49 +248,52 @@ impl Vault {
             .path
             .clone()
             .ok_or_else(|| anyhow!("vault has no path"))?;
-        let key_path = vault_key_path(&path);
-        if key_path.exists() {
-            perms::warn_if_loose_file(&key_path);
-            let disk = match seal::read_key(&key_path) {
-                Ok(key) => Zeroizing::new(key),
-                Err(err) => return Err(key_error(&path, &key_path, &err)),
-            };
-            if let Some(memory) = &self.key {
-                if disk.as_ref() != memory.as_ref() {
-                    return Err(refused_error(
-                        &path,
-                        &format!(
-                            "key file {} does not match the key already used for this vault",
-                            key_path.display()
-                        ),
-                    ));
-                }
-            } else {
-                self.key = Some(disk);
-            }
-            return Ok(());
-        }
+        let acquired = acquire(&path, &self.backend, true)?;
         if let Some(memory) = &self.key {
-            return match seal::write_new_key(&key_path, memory) {
-                Ok(()) => Ok(()),
-                Err(err) => Err(key_error(&path, &key_path, &err)),
-            };
+            if memory.as_ref() != acquired.key.as_ref() {
+                return Err(refused_error(
+                    &path,
+                    "the stored vault key does not match the key already used for this vault",
+                ));
+            }
+        } else {
+            self.key = Some(acquired.key);
         }
-        let created = match seal::read_or_create_key(&key_path) {
-            Ok(key) => key,
-            Err(err) => return Err(key_error(&path, &key_path, &err)),
-        };
-        self.key = Some(Zeroizing::new(created));
+        self.key_home = Some(acquired.home);
         Ok(())
     }
 }
 
-fn load_plaintext(path: &Path, bytes: &[u8]) -> Result<Vault> {
+fn default_backend() -> Backend {
+    // Unit tests compile this crate with cfg(test) and must not touch a real
+    // keychain. The binary uses the OS keychain. Integration tests set
+    // SYMVEIL_TEST_FILE_KEY=1 so the proxy they spawn stays on the file
+    // fallback and does not write into a developer keychain.
+    #[cfg(test)]
+    {
+        Backend::Unavailable
+    }
+    #[cfg(not(test))]
+    {
+        if file_key_forced() {
+            Backend::Unavailable
+        } else {
+            Backend::System
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn file_key_forced() -> bool {
+    std::env::var("SYMVEIL_TEST_FILE_KEY").ok().as_deref() == Some("1")
+}
+
+fn load_plaintext(path: &Path, bytes: &[u8], backend: Backend) -> Result<Vault> {
     refuse_linked_plaintext(path)?;
     let entries = parse_entries(bytes).map_err(|err| {
         refused_error(path, &format!("plaintext vault could not be read: {err:#}"))
     })?;
-    let mut vault = from_entries(path.to_path_buf(), entries).map_err(|err| {
+    let mut vault = from_entries(path.to_path_buf(), entries, backend).map_err(|err| {
         refused_error(path, &format!("plaintext vault could not be read: {err:#}"))
     })?;
     vault.dirty = true;
@@ -276,23 +310,16 @@ fn load_plaintext(path: &Path, bytes: &[u8]) -> Result<Vault> {
     Ok(vault)
 }
 
-fn load_sealed(path: &Path, envelope: &seal::Envelope) -> Result<Vault> {
-    let key_path = vault_key_path(path);
-    if key_path.exists() {
-        perms::warn_if_loose_file(&key_path);
-    }
-    let key = match seal::read_key(&key_path) {
-        Ok(key) => key,
-        Err(err) => return Err(key_error(path, &key_path, &err)),
-    };
-    let plain = match seal::open_envelope(&key, envelope) {
+fn load_sealed(path: &Path, envelope: &seal::Envelope, backend: Backend) -> Result<Vault> {
+    let acquired = acquire(path, &backend, false)?;
+    let plain = match seal::open_envelope(&acquired.key, envelope) {
         Ok(plain) => Zeroizing::new(plain),
         Err(seal::SealError::DecryptFailed) => {
             return Err(refused_error(
                 path,
                 &format!(
-                    "could not decrypt the vault with the key in {}. The key does not match this vault, or the vault file was modified",
-                    key_path.display()
+                    "could not decrypt the vault with the key from {}. The key does not match this vault, or the vault file was modified",
+                    acquired.home.line()
                 ),
             ));
         }
@@ -304,11 +331,231 @@ fn load_sealed(path: &Path, envelope: &seal::Envelope) -> Result<Vault> {
             &format!("decrypted vault payload is not a version {VAULT_VERSION} vault: {err:#}"),
         )
     })?;
-    let mut vault = from_entries(path.to_path_buf(), entries).map_err(|err| {
+    let mut vault = from_entries(path.to_path_buf(), entries, backend).map_err(|err| {
         refused_error(path, &format!("decrypted vault could not be read: {err:#}"))
     })?;
-    vault.key = Some(Zeroizing::new(key));
+    vault.key = Some(acquired.key);
+    vault.key_home = Some(acquired.home);
     Ok(vault)
+}
+
+struct Acquired {
+    key: Zeroizing<[u8; 32]>,
+    home: KeyHome,
+}
+
+/// Find or create the key. `create` is false for a sealed vault: a missing key
+/// is an error, and no new key is written.
+fn acquire(path: &Path, backend: &Backend, create: bool) -> Result<Acquired> {
+    let account = keystore::key_account(path);
+    let file = vault_key_path(path);
+    if file.exists() {
+        perms::warn_if_loose_file(&file);
+    }
+    match backend.get(&account) {
+        Ok(Some(key)) => adopt_keychain_key(path, &file, &account, key),
+        Ok(None) => acquire_without_keychain_entry(path, &file, backend, &account, create),
+        Err(KeyFailure::Unavailable(reason)) => {
+            acquire_from_file(path, &file, create, Some(reason))
+        }
+        Err(KeyFailure::Failed(reason)) => Err(refused_error(
+            path,
+            &format!("could not read the OS keychain ({reason})"),
+        )),
+    }
+}
+
+fn adopt_keychain_key(
+    path: &Path,
+    file: &Path,
+    account: &str,
+    key: Zeroizing<[u8; 32]>,
+) -> Result<Acquired> {
+    if file.exists() {
+        let disk = read_file_key(path, file)?;
+        if disk.as_ref() != key.as_ref() {
+            return Err(refused_error(
+                path,
+                &format!(
+                    "OS keychain entry {SERVICE}/{account} and key file {} do not match. Remove one of the two keys",
+                    file.display()
+                ),
+            ));
+        }
+        remove_migrated_file(file);
+    }
+    Ok(Acquired {
+        key,
+        home: KeyHome::Keychain {
+            account: account.to_string(),
+        },
+    })
+}
+
+fn acquire_without_keychain_entry(
+    path: &Path,
+    file: &Path,
+    backend: &Backend,
+    account: &str,
+    create: bool,
+) -> Result<Acquired> {
+    if file.exists() {
+        let disk = read_file_key(path, file)?;
+        return match backend.put(account, &disk) {
+            Ok(()) => {
+                remove_migrated_file(file);
+                eprintln!(
+                    "symveil: moved the vault key from {} into the OS keychain (service {SERVICE}, account {account})",
+                    file.display()
+                );
+                Ok(Acquired {
+                    key: disk,
+                    home: KeyHome::Keychain {
+                        account: account.to_string(),
+                    },
+                })
+            }
+            Err(KeyFailure::Unavailable(reason)) => {
+                keystore::warn_file_fallback(file, &reason);
+                Ok(Acquired {
+                    key: disk,
+                    home: KeyHome::File(file.to_path_buf()),
+                })
+            }
+            Err(KeyFailure::Failed(reason)) => Err(refused_error(
+                path,
+                &format!(
+                    "could not move key file {} into the OS keychain ({reason}). The key file was left in place",
+                    file.display()
+                ),
+            )),
+        };
+    }
+    if !create {
+        return Err(missing_key(path, file, account, None));
+    }
+    let key = Zeroizing::new(seal::generate_key());
+    match backend.put(account, &key) {
+        Ok(()) => Ok(Acquired {
+            key,
+            home: KeyHome::Keychain {
+                account: account.to_string(),
+            },
+        }),
+        Err(KeyFailure::Unavailable(reason)) => {
+            let key = create_file_key(path, file)?;
+            keystore::warn_file_fallback(file, &reason);
+            Ok(Acquired {
+                key,
+                home: KeyHome::File(file.to_path_buf()),
+            })
+        }
+        Err(KeyFailure::Failed(reason)) => Err(refused_error(
+            path,
+            &format!("could not store a new vault key in the OS keychain ({reason})"),
+        )),
+    }
+}
+
+fn acquire_from_file(
+    path: &Path,
+    file: &Path,
+    create: bool,
+    reason: Option<String>,
+) -> Result<Acquired> {
+    if file.exists() {
+        let disk = read_file_key(path, file)?;
+        if let Some(reason) = reason.as_deref() {
+            keystore::warn_file_fallback(file, reason);
+        }
+        return Ok(Acquired {
+            key: disk,
+            home: KeyHome::File(file.to_path_buf()),
+        });
+    }
+    if !create {
+        return Err(missing_key(
+            path,
+            file,
+            &keystore::key_account(path),
+            reason,
+        ));
+    }
+    let key = create_file_key(path, file)?;
+    if let Some(reason) = reason.as_deref() {
+        keystore::warn_file_fallback(file, reason);
+    }
+    Ok(Acquired {
+        key,
+        home: KeyHome::File(file.to_path_buf()),
+    })
+}
+
+fn read_file_key(vault: &Path, file: &Path) -> Result<Zeroizing<[u8; 32]>> {
+    match seal::read_key(file) {
+        Ok(key) => Ok(Zeroizing::new(key)),
+        Err(err) => Err(key_error(vault, file, &err)),
+    }
+}
+
+fn create_file_key(vault: &Path, file: &Path) -> Result<Zeroizing<[u8; 32]>> {
+    match seal::read_or_create_key(file) {
+        Ok(key) => Ok(Zeroizing::new(key)),
+        Err(err) => Err(key_error(vault, file, &err)),
+    }
+}
+
+fn remove_migrated_file(file: &Path) {
+    #[cfg(unix)]
+    if let Ok(meta) = fs::metadata(file) {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() > 1 {
+            eprintln!(
+                "symveil: warning: {} has another hard link, so removing it from this path still leaves a copy of the vault key",
+                file.display()
+            );
+        }
+    }
+    if let Err(err) = fs::remove_file(file) {
+        eprintln!(
+            "symveil: warning: the vault key is in the OS keychain, but {} could not be removed ({err}). A copy of that file can still decrypt the vault.",
+            file.display()
+        );
+    }
+}
+
+fn missing_key(
+    vault: &Path,
+    file: &Path,
+    account: &str,
+    keychain_reason: Option<String>,
+) -> anyhow::Error {
+    let reason = match keychain_reason {
+        Some(why) => format!(
+            "encrypted vault needs its key. No OS keychain is available ({why}), and key file {} is missing. Without that key, placeholders from this vault cannot be restored, and a new key will not decrypt it",
+            file.display()
+        ),
+        None => format!(
+            "encrypted vault needs its key, which is not in the OS keychain (service {SERVICE}, account {account}) and key file {} is missing. Without that key, placeholders from this vault cannot be restored, and a new key will not decrypt it",
+            file.display()
+        ),
+    };
+    refused_error(vault, &reason)
+}
+
+fn planned_location(path: &Path, backend: &Backend) -> String {
+    let account = keystore::key_account(path);
+    let file = vault_key_path(path);
+    match backend.get(&account) {
+        Ok(Some(_)) => KeyHome::Keychain { account }.line(),
+        Ok(None) if file.exists() => KeyHome::File(file).line(),
+        Ok(None) => KeyHome::Keychain { account }.line(),
+        Err(KeyFailure::Unavailable(reason)) => {
+            keystore::warn_file_fallback(&file, &reason);
+            KeyHome::File(file).line()
+        }
+        Err(KeyFailure::Failed(_)) => KeyHome::Keychain { account }.line(),
+    }
 }
 
 fn parse_entries(bytes: &[u8]) -> Result<Vec<Entry>> {
@@ -322,8 +569,8 @@ fn parse_entries(bytes: &[u8]) -> Result<Vec<Entry>> {
     Ok(file.entries)
 }
 
-fn from_entries(path: PathBuf, entries: Vec<Entry>) -> Result<Vault> {
-    let mut vault = Vault::create(path.clone());
+fn from_entries(path: PathBuf, entries: Vec<Entry>, backend: Backend) -> Result<Vault> {
+    let mut vault = Vault::create_with(path.clone(), backend);
     for entry in entries {
         if let Some(other) = vault.reverse.get(&entry.placeholder) {
             if other != &entry.original {
@@ -761,6 +1008,110 @@ mod tests {
         assert_eq!(mode_bits(&dir), before);
         assert_eq!(mode_bits(&path), 0o600);
         assert_eq!(mode_bits(&vault_key_path(&path)), 0o600);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memory_keychain_keeps_the_key_out_of_the_directory() {
+        let dir = temp_dir("vault-memory");
+        let path = dir.join("vault.json");
+        let secret = "memory-secret-value-4c";
+        let backend = Backend::memory();
+        let mut vault = Vault::create_with(path.clone(), backend.clone());
+        let token = vault.assign(secret, Category::Secret, None).unwrap();
+        vault.save().unwrap();
+        assert!(
+            !vault_key_path(&path).exists(),
+            "a keychain store does not write vault.key"
+        );
+        assert!(vault.key_location_line().contains("OS keychain"));
+        assert!(!contains(&fs::read(&path).unwrap(), secret.as_bytes()));
+        let loaded = Vault::load_with(&path, backend).unwrap();
+        assert_eq!(loaded.placeholder(secret), Some(token.as_str()));
+        assert!(!vault_key_path(&path).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_key_is_moved_into_the_keychain() {
+        let dir = temp_dir("vault-migrate-key");
+        let path = dir.join("vault.json");
+        let secret = "file-secret-value-22ab";
+        let mut vault = Vault::create_with(path.clone(), Backend::Unavailable);
+        let token = vault.assign(secret, Category::Secret, None).unwrap();
+        vault.save().unwrap();
+        assert!(vault_key_path(&path).exists());
+        let backend = Backend::memory();
+        let loaded = Vault::load_with(&path, backend.clone()).unwrap();
+        assert_eq!(loaded.placeholder(secret), Some(token.as_str()));
+        assert!(
+            !vault_key_path(&path).exists(),
+            "migration removes the file once the keychain has the key"
+        );
+        assert!(loaded.key_location_line().contains("OS keychain"));
+        let again = Vault::load_with(&path, backend).unwrap();
+        assert_eq!(again.placeholder(secret), Some(token.as_str()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_that_matches_the_keychain_is_removed() {
+        let dir = temp_dir("vault-same-key");
+        let path = dir.join("vault.json");
+        let secret = "same-key-secret-value";
+        let mut vault = Vault::create_with(path.clone(), Backend::Unavailable);
+        let token = vault.assign(secret, Category::Secret, None).unwrap();
+        vault.save().unwrap();
+        let key_bytes = fs::read(vault_key_path(&path)).unwrap();
+        let backend = Backend::memory();
+        Vault::load_with(&path, backend.clone()).unwrap();
+        assert!(!vault_key_path(&path).exists());
+        fs::write(vault_key_path(&path), &key_bytes).unwrap();
+        let loaded = Vault::load_with(&path, backend).unwrap();
+        assert_eq!(loaded.placeholder(secret), Some(token.as_str()));
+        assert!(
+            !vault_key_path(&path).exists(),
+            "a file copy of the keychain key is removed"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keychain_and_file_that_disagree_are_left_in_place() {
+        let dir = temp_dir("vault-disagree");
+        let path = dir.join("vault.json");
+        let secret = "disagree-secret-value";
+        let backend = Backend::memory();
+        let mut vault = Vault::create_with(path.clone(), backend.clone());
+        vault.assign(secret, Category::Secret, None).unwrap();
+        vault.save().unwrap();
+        let sealed = fs::read(&path).unwrap();
+        crate::seal::write_new_key(&vault_key_path(&path), &crate::seal::generate_key()).unwrap();
+        let err = expect_err(Vault::load_with(&path, backend));
+        assert_refused(&err);
+        let text = err_text(&err);
+        assert!(text.contains("do not match"), "{text}");
+        assert_eq!(fs::read(&path).unwrap(), sealed);
+        assert!(vault_key_path(&path).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sealed_vault_does_not_get_a_new_key_when_the_keychain_is_empty() {
+        let dir = temp_dir("vault-no-mint");
+        let path = dir.join("vault.json");
+        let mut vault = Vault::create_with(path.clone(), Backend::memory());
+        vault
+            .assign("no-mint-secret-value", Category::Secret, None)
+            .unwrap();
+        vault.save().unwrap();
+        let sealed = fs::read(&path).unwrap();
+        let err = expect_err(Vault::load_with(&path, Backend::memory()));
+        assert_refused(&err);
+        let text = err_text(&err);
+        assert!(text.contains("missing"), "{text}");
+        assert_eq!(fs::read(&path).unwrap(), sealed);
+        assert!(!vault_key_path(&path).exists());
         let _ = fs::remove_dir_all(&dir);
     }
 

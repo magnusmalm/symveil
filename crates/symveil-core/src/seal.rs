@@ -175,7 +175,7 @@ fn decode_nonce(text: &str) -> Result<[u8; NONCE_LEN], SealError> {
     bytes.try_into().map_err(|_| SealError::Malformed("nonce"))
 }
 
-fn generate_key() -> [u8; 32] {
+pub(crate) fn generate_key() -> [u8; 32] {
     let key = Aes256Gcm::generate_key(OsRng);
     let mut out = [0u8; 32];
     out.copy_from_slice(key.as_slice());

@@ -61,8 +61,15 @@ impl Drop for ChildGuard {
     }
 }
 
+fn use_file_key() {
+    // The proxy process also gets this from spawn_cli. Setting it here covers
+    // Vault::create in this process, so a developer keychain is never written.
+    std::env::set_var("SYMVEIL_TEST_FILE_KEY", "1");
+}
+
 #[tokio::test]
 async fn proxy_masks_a_secret_and_restores_it_after_restart() {
+    use_file_key();
     let root = temp_dir("e2e-vault");
     let symveil_dir = root.join(".symveil");
     let vault_path = symveil_dir.join("vault.json");
@@ -72,6 +79,11 @@ async fn proxy_masks_a_secret_and_restores_it_after_restart() {
     assert!(
         !vault_path.exists(),
         "a new vault is written when a value is masked"
+    );
+    assert!(
+        proxy.logs().contains("no OS keychain"),
+        "file fallback should be loud: {}",
+        proxy.logs()
     );
 
     let client = reqwest::Client::builder()
@@ -140,6 +152,7 @@ async fn proxy_masks_a_secret_and_restores_it_after_restart() {
 
 #[tokio::test]
 async fn proxy_migrates_a_plaintext_vault_and_restores_the_old_placeholder() {
+    use_file_key();
     let root = temp_dir("e2e-migrate");
     let symveil_dir = root.join(".symveil");
     std::fs::create_dir(&symveil_dir).unwrap();
@@ -228,6 +241,7 @@ async fn proxy_migrates_a_plaintext_vault_and_restores_the_old_placeholder() {
 
 #[test]
 fn proxy_exits_when_the_key_is_missing() {
+    use_file_key();
     let root = temp_dir("cli-missing-key");
     let vault_path = root.join(".symveil").join("vault.json");
     std::fs::create_dir_all(vault_path.parent().unwrap()).unwrap();
@@ -250,6 +264,7 @@ fn proxy_exits_when_the_key_is_missing() {
 
 #[test]
 fn proxy_exits_when_the_key_is_wrong() {
+    use_file_key();
     let root = temp_dir("cli-wrong-key");
     let vault_path = root.join(".symveil").join("vault.json");
     std::fs::create_dir_all(vault_path.parent().unwrap()).unwrap();
@@ -286,6 +301,7 @@ fn proxy_exits_when_the_key_is_wrong() {
 fn proxy_fails(repo: &Path) -> String {
     let mut child = Command::new(env!("CARGO_BIN_EXE_symveil"))
         .current_dir(repo)
+        .env("SYMVEIL_TEST_FILE_KEY", "1")
         .args(["proxy", "--repo", ".", "--port", "0"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -339,6 +355,7 @@ async fn spawn_cli(repo: &Path, openai: &str, anthropic: &str) -> RunningProxy {
 fn spawn_cli_blocking(repo: &Path, openai: &str, anthropic: &str) -> RunningProxy {
     let child = Command::new(env!("CARGO_BIN_EXE_symveil"))
         .current_dir(repo)
+        .env("SYMVEIL_TEST_FILE_KEY", "1")
         .args([
             "proxy",
             "--repo",

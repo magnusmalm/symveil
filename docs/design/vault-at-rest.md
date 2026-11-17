@@ -8,12 +8,13 @@ agent, intercepts TLS, or hides secrets from the user who runs it.
 ## What is protected
 
 On Unix, a vault SymVeil creates is ciphertext unless the reader also has the
-key file. That holds for:
+key. That holds for:
 
-- Another local account that is not root and cannot read mode `0600` files in
-  a mode `0700` directory.
+- Another local account that is not root and cannot read the owner's keychain
+  or, when the file fallback is in use, mode `0600` files in a mode `0700`
+  directory.
 - A copy, attachment, or partial backup of `vault.json` that does not include
-  the sibling key file.
+  the keychain entry or the fallback key file.
 - Someone opening the vault in an editor. The file does not show the original
   values.
 - A modified ciphertext. AES-GCM authentication fails, SymVeil refuses to
@@ -28,12 +29,13 @@ which is unchanged.
 Encryption here is a file format plus owner-only permissions. It does not
 raise the bar against a caller who is already the vault's owner.
 
-- Any process running as the same user can read the key file and the
+- Any process running as the same user can read the keychain entry and the
   plaintext in memory. That includes malware, a debugger, and a shell as that
-  user. A mode `0600` file does not stop the owner.
+  user. A keychain does not stop the owner.
 - Root, and anyone who can impersonate the user, can read the key.
-- A backup, sync, or disk image of the whole `.symveil/` directory includes
-  the key. Encryption does not help that copy.
+- A backup of the whole `.symveil/` directory does not include the keychain
+  entry. It does include `.symveil/vault.key` when the file fallback is in
+  use. Encryption does not help that copy.
 - An older plaintext copy of the vault, from before it was encrypted, is
   still plaintext.
 - Secrets that already left the machine, and placeholders already sent
@@ -45,19 +47,33 @@ raise the bar against a caller who is already the vault's owner.
 
 ## Key storage
 
-Three places to keep the 32-byte AES key:
+The 32-byte AES key is stored in the OS keychain through the `keyring` crate:
 
-| Option | Fit |
+| Platform | Store |
 | --- | --- |
-| OS keychain (`keyring` or similar) | The key is outside `.symveil/`, so a copy of the directory is not enough to decrypt. Headless agents, SSH sessions, CI, and containers often have no Secret Service or login keychain. The same user can still read a keychain entry. Not the default. |
-| Key file, mode `0600` | Works without a desktop session. The mode is testable. This is the implementation. The file is the sibling of the vault: `.symveil/vault.json` uses `.symveil/vault.key`. |
-| Environment variable | Same owner can read it, and it also shows up in process listings and service definitions. Worse than a `0600` file for the same boundary. Not used. |
+| macOS | Keychain |
+| Linux | Secret Service |
+| Windows | Credential Manager |
+
+The service name is `symveil`. The account is `vault-key-` plus the SHA-256
+hex of the vault path, so two vaults do not share a key. The keychain holds
+the raw 32 bytes. There is no passphrase and no KDF.
+
+A file is the fallback, and only then. When the keychain cannot be opened at
+all (no Secret Service, no login keychain, a headless session), SymVeil writes
+`.symveil/vault.key` at mode `0600` and prints `no OS keychain is available`
+on stderr, with the path. A copy of the directory then includes the key. A
+keychain that exists but is locked or returns an error is not this case:
+startup fails, and SymVeil does not write a second key beside the vault.
+
+An environment variable is not a key store. It would show up in process
+listings. Not used.
 
 An age identity file (mentioned on issue #7) is another on-disk key. The vault
 does not need public-key wrapping. Not used.
 
-There is no passphrase and no KDF. The key file is the raw key. Moving that
-file into the OS keychain later does not require a new vault payload format.
+The vault payload format does not change when the key moves between the
+keychain and the file.
 
 ## Cipher
 
@@ -105,14 +121,19 @@ A file that does not have that header is not overwritten.
 ## Migration
 
 A version 1 JSON object that has no `cipher`, `nonce`, or `ciphertext` field
-is a plaintext vault. `Vault::load` reads it, writes the key if there is not
-one yet, and replaces the file with a version 2 envelope. The key file is
-synced before that replace. A crash before the replace leaves the plaintext
-file in place; the next open retries with the same key.
+is a plaintext vault. `Vault::load` reads it, stores the key (keychain, or the
+file when no keychain can be opened), and replaces the file with a version 2
+envelope. The key is stored before that replace. A crash before the replace
+leaves the plaintext file in place; the next open retries with the same key.
 
 If the version 1 file cannot be parsed, or a key file is already there and is
 not a valid SymVeil key, the plaintext file is left as it is and the open
 fails.
+
+An existing `.symveil/vault.key` is copied into the keychain on open and the
+file is removed. If the keychain already has a different key for that vault,
+the open fails and both copies are left as they are. If the keychain cannot
+be opened, the file stays and the warning is printed.
 
 A file that is version 1 and also has encryption fields is refused. It is not
 loaded as an empty map and then saved over the original.
@@ -124,19 +145,24 @@ so an old file is migrated at startup, before the proxy accepts a connection.
 
 There is no escrow and no recovery.
 
-- Sealed vault, key file missing: open fails. SymVeil does not create a
-  replacement key and does not start with an empty vault. A new key cannot
-  decrypt the existing file. Placeholders already issued from this vault
-  cannot be restored unless the original key file is put back.
+- Sealed vault, key missing from the keychain and from the file: open fails.
+  SymVeil does not create a replacement key and does not start with an empty
+  vault. A new key cannot decrypt the existing file. Placeholders already
+  issued from this vault cannot be restored unless the original key is put
+  back.
 - Key file present but not the header-plus-32-byte format: open fails. The
   key file and the vault are both left as they are. If the vault is still
   plaintext, move that key file aside and open again. If the vault is sealed,
   put the original key back.
-- Key file is a valid key for a different vault, or the ciphertext was
+- Keychain entry and key file both exist and differ: open fails. Neither is
+  overwritten.
+- The key is a valid key for a different vault, or the ciphertext was
   modified: AES-GCM verification fails. The vault is left as it is.
-- Deleting both the vault and the key starts a new map. Old placeholders in
+- Deleting the vault and its key starts a new map. Old placeholders in
   transcripts stay unrestorable. That is a manual choice; SymVeil does not do
-  it on error.
+  it on error. Moving the vault to a new path changes the keychain account
+  (it is a hash of the path), so the old entry is not found. Put the key file
+  next to the vault, or the path has to stay the same.
 
 The error text says the vault was left unchanged and that it will not be
 replaced with an empty vault. `symveil proxy` exits before it listens.
@@ -148,7 +174,7 @@ SymVeil forces these modes after create, so a loose umask cannot widen them:
 | Path | Mode | When |
 | --- | --- | --- |
 | Directory it creates for the vault (`.symveil/`) | `0700` | The directory did not exist |
-| `vault.json`, `vault.key`, the `*.tmp` write, `audit.jsonl` | `0600` | SymVeil creates the file |
+| `vault.json`, `vault.key` (only if there is no keychain), the `*.tmp` write, `audit.jsonl` | `0600` | SymVeil creates the file |
 
 Missing parents that SymVeil has to create are also `0700`. An existing
 directory is not chmod'd. An existing audit log is not chmod'd. If group or
@@ -166,9 +192,12 @@ They do not stop the owner, and they do not stop root.
 
 - Issue #7 step 3: `symveil vault clear`, and a max age so old values do not
   accumulate. Not in this change.
-- Putting the key in the OS keychain, or a path outside the repository, so a
-  directory backup does not include it.
 - An explicit opt-out that keeps writing version 1 plaintext.
+- Tests do not open a real keychain. The keychain path uses an in-memory
+  backend. The binary reads `SYMVEIL_TEST_FILE_KEY`. When it is `1`, that
+  process uses the file fallback and prints the same warning, even if a
+  keychain exists. The proxy integration test sets it so a developer keychain
+  is never written. It is not a second supported configuration.
 - Whether a loose existing key or audit log should be chmod'd to `0600`
   instead of only warned about.
 - The proxy still logs a warning and forwards the request if a vault save
