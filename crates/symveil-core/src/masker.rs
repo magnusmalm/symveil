@@ -1,8 +1,9 @@
 //! Plugin interface for redaction.
 //!
-//! The free proxy always installs the secret and network maskers. Identifier
-//! and code-name masking is a separate crate that implements [`Masker`] and is
-//! compiled only behind the `identifiers` feature of the `symveil` binary.
+//! The free proxy always installs the secret and network maskers, and the
+//! name masker when `[redact.names]` is set. The identifier index is a
+//! separate crate that implements [`Masker`] and is compiled only behind the
+//! `identifiers` feature of the `symveil` binary.
 
 use crate::category::Category;
 

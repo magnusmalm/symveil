@@ -2,9 +2,9 @@
 //! cloud model and restores them in the response. Personal-data rules are
 //! installed only when `[redact.pii]` turns them on.
 //!
-//! Identifier and code-name masking is not in this crate. It is a [`Masker`]
-//! plugin loaded by the `symveil` binary when that binary is built with the
-//! `identifiers` feature.
+//! Company, product, and project names are masked when `[redact.names]` lists
+//! them. The identifier index is a [`Masker`] plugin loaded by the `symveil`
+//! binary when that binary is built with the `identifiers` feature.
 
 #![forbid(unsafe_code)]
 
@@ -16,6 +16,7 @@ pub mod audit;
 pub mod category;
 pub mod config;
 pub mod masker;
+pub mod names;
 pub mod pii;
 pub mod proxy;
 pub mod redact;

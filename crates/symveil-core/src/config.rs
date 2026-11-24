@@ -234,6 +234,21 @@ impl PiiSection {
     }
 }
 
+/// Company, product, and project names for the free-core masker.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct NamesSection {
+    pub terms: Vec<String>,
+    /// Project-code regexes, used as written. `TDH-\d+` is a typical entry.
+    pub patterns: Vec<UserPattern>,
+}
+
+impl NamesSection {
+    pub fn enabled(&self) -> bool {
+        !self.terms.is_empty() || !self.patterns.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct RedactSection {
@@ -262,6 +277,9 @@ pub struct RedactSection {
     pub high_entropy: bool,
     #[serde(default)]
     pub pii: PiiSection,
+    /// Company, product, and project names. Empty leaves names untouched.
+    #[serde(default)]
+    pub names: NamesSection,
 }
 
 impl Default for RedactSection {
@@ -277,6 +295,7 @@ impl Default for RedactSection {
             secrets: Vec::new(),
             high_entropy: false,
             pii: PiiSection::default(),
+            names: NamesSection::default(),
         }
     }
 }
@@ -299,6 +318,7 @@ impl RedactSection {
                 );
             }
         }
+        crate::names::validate(&self.names)?;
         for rule in &self.secrets {
             if known.iter().any(|builtin| *builtin == rule.name) {
                 anyhow::bail!(
