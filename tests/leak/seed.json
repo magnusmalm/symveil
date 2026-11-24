@@ -1,0 +1,1777 @@
+{
+  "about": "FAKE synthetic corpus for SymVeil leak measurement. Company Exempla, product Tundrahorn (TDH). No real employer, person, host, or product. Identity numbers use year 2099 and the checksums from the in-tree fixtures or the same Luhn rule. Phones use 000.",
+  "restore": {
+    "text": "note \"ok\" AKIASVCNCANARYKEY001 wiki.exempla.internal 10.44.7.15 fan.operator@exempla.test fläkt",
+    "tool": "{\"cmd\": \"cat\", \"key\": \"AKIASVCNCANARYKEY001\"}"
+  },
+  "items": [
+    {
+      "id": "aws-access-key",
+      "category": "secret.aws-access-key-id",
+      "expect": "masked",
+      "family": "secret",
+      "value": "AKIASVCNCANARYKEY001",
+      "rule": "aws-access-key-id",
+      "carrier": "AKIASVCNCANARYKEY001",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "ops/docker-inspect.json",
+        "ops/pytest-traceback.txt",
+        "docs/lab.ipynb"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "aws-json-key",
+      "category": "secret.aws-access-key-id",
+      "expect": "masked",
+      "family": "secret",
+      "value": "AKIASVCNJSONKEY00001",
+      "rule": "aws-access-key-id",
+      "carrier": "AKIASVCNJSONKEY00001",
+      "locations": [
+        "session:json-key"
+      ],
+      "severity": "high",
+      "repro": "POST /v1/messages with the canary as a JSON object key (session json-key), not inside a string. The file corpus does not contain this value.",
+      "fix": "redact_value walks object values and skips keys, so a covered token used as a JSON key is sent upstream. Run the same string scan on object keys. Canary id: aws-json-key."
+    },
+    {
+      "id": "github-pat",
+      "category": "secret.github-pat",
+      "expect": "masked",
+      "family": "secret",
+      "value": "ghp_SVCNGITHUBPAT00000000000000000000000",
+      "rule": "github-pat",
+      "carrier": "ghp_SVCNGITHUBPAT00000000000000000000000",
+      "locations": [
+        "home/jdoe/.bash_history"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "github-fine",
+      "category": "secret.github-fine-grained-pat",
+      "expect": "masked",
+      "family": "secret",
+      "value": "github_pat_SVCNFINEGRAINED0000000_SVCNFGPAYLOAD0000000000000000000000000000000000000000000000",
+      "rule": "github-fine-grained-pat",
+      "carrier": "github_pat_SVCNFINEGRAINED0000000_SVCNFGPAYLOAD0000000000000000000000000000000000000000000000",
+      "locations": [
+        "ci/fan.yml"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "slack",
+      "category": "secret.slack-token",
+      "expect": "masked",
+      "family": "secret",
+      "value": "xoxb-SVCNSlackTok01",
+      "rule": "slack-token",
+      "carrier": "xoxb-SVCNSlackTok01",
+      "locations": [
+        "configs/fan.yaml"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "google",
+      "category": "secret.google-api-key",
+      "expect": "masked",
+      "family": "secret",
+      "value": "AIzaSVCNGOOGLEKEY0000000000000000000000",
+      "rule": "google-api-key",
+      "carrier": "AIzaSVCNGOOGLEKEY0000000000000000000000",
+      "locations": [
+        "tools/fan_check.py"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "stripe",
+      "category": "secret.stripe-live-secret",
+      "expect": "masked",
+      "family": "secret",
+      "value": "sk_live_SVCNSTRIPEKEY00000000000",
+      "rule": "stripe-live-secret",
+      "carrier": "sk_live_SVCNSTRIPEKEY00000000000",
+      "locations": [
+        "services/bridge/main.go"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "openai",
+      "category": "secret.openai-api-key",
+      "expect": "masked",
+      "family": "secret",
+      "value": "sk-SVCNopenaiLEGACYKEY00000000000000000000000000000",
+      "rule": "openai-api-key",
+      "carrier": "sk-SVCNopenaiLEGACYKEY00000000000000000000000000000",
+      "locations": [
+        "home/jdoe/.bash_history"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "openai-proj",
+      "category": "secret.openai-api-key",
+      "expect": "masked",
+      "family": "secret",
+      "value": "sk-proj-SVCNopenaiprojectkey000000000000",
+      "rule": "openai-api-key",
+      "carrier": "sk-proj-SVCNopenaiprojectkey000000000000",
+      "locations": [
+        "deploy/Dockerfile"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "anthropic",
+      "category": "secret.anthropic-api-key",
+      "expect": "masked",
+      "family": "secret",
+      "value": "sk-ant-SVCNanthropickey00000000",
+      "rule": "anthropic-api-key",
+      "carrier": "sk-ant-SVCNanthropickey00000000",
+      "locations": [
+        "services/fanctl/src/main.rs"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "jwt",
+      "category": "secret.jwt",
+      "expect": "masked",
+      "family": "secret",
+      "value": "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZGgtdGVzdCJ9.SVCNJWT0000000000",
+      "rule": "jwt",
+      "carrier": "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZGgtdGVzdCJ9.SVCNJWT0000000000",
+      "locations": [
+        "services/fanctl/src/main.rs"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "jwt-long",
+      "category": "secret.jwt",
+      "expect": "masked",
+      "family": "secret",
+      "value": "SVCNJWTLONG",
+      "rule": "jwt",
+      "carrier": "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZGgtdGVzdCJ9.SVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONG",
+      "locations": [
+        "services/fanctl/src/main.rs"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "url-password",
+      "category": "secret.url-password",
+      "expect": "masked",
+      "family": "secret",
+      "value": "s3cretSVCN:with:colon",
+      "rule": "url-password",
+      "carrier": "postgres://fan_svc:s3cretSVCN:with:colon@db.tundrahorn.corp:5432/fan",
+      "locations": [
+        "logs/fan-error.log"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "pem-line",
+      "category": "secret.private-key",
+      "expect": "masked",
+      "family": "secret",
+      "value": "SVCNPRIVATEKEYLINE0001",
+      "rule": "private-key",
+      "carrier": "-----BEGIN PRIVATE KEY-----\nSVCNPRIVATEKEYLINE0001\n-----END PRIVATE KEY-----\n",
+      "locations": [
+        "configs/fake-key.pem"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "openssh-line",
+      "category": "secret.private-key",
+      "expect": "masked",
+      "family": "secret",
+      "value": "SVCNOPENSSHKEYLINE0001",
+      "rule": "private-key",
+      "carrier": "-----BEGIN OPENSSH PRIVATE KEY-----\nSVCNOPENSSHKEYLINE0001\n-----END OPENSSH PRIVATE KEY-----\n",
+      "locations": [
+        "configs/fake-openssh.key"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "ini-password",
+      "category": "secret.generic-api-key",
+      "expect": "masked",
+      "family": "secret",
+      "value": "svcn-ini-password-0001",
+      "rule": "generic-api-key",
+      "carrier": "password = \"svcn-ini-password-0001\"",
+      "locations": [
+        "configs/fan.ini"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "toml-token",
+      "category": "secret.generic-api-key",
+      "expect": "masked",
+      "family": "secret",
+      "value": "svcn-toml-token-0001",
+      "rule": "generic-api-key",
+      "carrier": "token = \"svcn-toml-token-0001\"",
+      "locations": [
+        "configs/fan.toml"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "yaml-apikey",
+      "category": "secret.generic-api-key",
+      "expect": "masked",
+      "family": "secret",
+      "value": "svcn-yaml-apikey-0001",
+      "rule": "generic-api-key",
+      "carrier": "api_key: \"svcn-yaml-apikey-0001\"",
+      "locations": [
+        "configs/fan.yaml"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "json-password",
+      "category": "secret.generic-api-key",
+      "expect": "masked",
+      "family": "secret",
+      "value": "svcn-json-password-0001",
+      "rule": "generic-api-key",
+      "carrier": "\"password\": \"svcn-json-password-0001\"",
+      "locations": [
+        "configs/fan.json"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "env-unquoted",
+      "category": "secret.env-assignment",
+      "expect": "masked",
+      "family": "secret",
+      "value": "svcn-env-unquoted-0001",
+      "rule": "env-assignment",
+      "carrier": "TDH_DB_PASSWORD=svcn-env-unquoted-0001",
+      "locations": [
+        "configs/fan.env"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "env-quoted",
+      "category": "secret.env-quoted-assignment",
+      "expect": "masked",
+      "family": "secret",
+      "value": "svcn-env-quoted-0001",
+      "rule": "env-quoted-assignment",
+      "carrier": "export TDH_API_SECRET=\"svcn-env-quoted-0001\"",
+      "locations": [
+        "configs/fan.env"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "env-special",
+      "category": "secret.env-assignment",
+      "expect": "masked",
+      "family": "secret",
+      "value": "svcn:pass/word!9",
+      "rule": "env-assignment",
+      "carrier": "TDH_DB_PASS=svcn:pass/word!9",
+      "locations": [
+        "configs/fan.env"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "env-backslash",
+      "category": "secret.env-quoted-assignment",
+      "expect": "masked",
+      "family": "secret",
+      "value": "svcn\\pass0001",
+      "rule": "env-quoted-assignment",
+      "carrier": "TDH_API_KEY=\"svcn\\pass0001\"",
+      "locations": [
+        "configs/fan.env"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "env-long",
+      "category": "secret.env-quoted-assignment",
+      "expect": "masked",
+      "family": "secret",
+      "value": "SVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONG",
+      "rule": "env-quoted-assignment",
+      "carrier": "TDH_LONG_SECRET=\"SVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONG\"",
+      "locations": [
+        "configs/fan.env"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "env-printenv",
+      "category": "secret.env-assignment",
+      "expect": "masked",
+      "family": "secret",
+      "value": "svcn-printenv-value-0001",
+      "rule": "env-assignment",
+      "carrier": "TDH_API_KEY=svcn-printenv-value-0001",
+      "locations": [
+        "ops/printenv.txt"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "env-azure",
+      "category": "secret.env-assignment",
+      "expect": "masked",
+      "family": "secret",
+      "value": "svcn-azure-storage-0001",
+      "rule": "env-assignment",
+      "carrier": "AZURE_STORAGE_KEY=svcn-azure-storage-0001",
+      "locations": [
+        "configs/fan.env"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "env-gitlab",
+      "category": "secret.env-assignment",
+      "expect": "masked",
+      "family": "secret",
+      "value": "svcn-gitlab-env-0001",
+      "rule": "env-assignment",
+      "carrier": "GITLAB_TOKEN=svcn-gitlab-env-0001",
+      "locations": [
+        "configs/fan.env"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "custom-tdh",
+      "category": "secret.custom-rule",
+      "expect": "masked",
+      "family": "secret",
+      "value": "tdh_live_SVCNFACTORYTOKEN1",
+      "rule": "tdh-factory-token",
+      "carrier": "tdh_live_SVCNFACTORYTOKEN1",
+      "locations": [
+        "tools/fan_check.py"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "base64-short",
+      "category": "secret.base64",
+      "expect": "masked",
+      "family": "base64",
+      "value": "U1ZDTi1iYXNlNjQtcGxhaW50ZXh0LXNlY3JldC0wMDAx",
+      "rule": null,
+      "carrier": "U1ZDTi1iYXNlNjQtcGxhaW50ZXh0LXNlY3JldC0wMDAx",
+      "locations": [
+        "firmware/tundrahorn_fan.c"
+      ],
+      "severity": "high",
+      "repro": "firmware/tundrahorn_fan.c string blob. Decodes to the fake sentence SVCN-base64-plaintext-secret-0001. Sent as file text in messages and responses sessions. high_entropy is false.",
+      "fix": "Decode standard and URL-safe base64 spans of at least 16 characters and run the builtin secret rules on the decoded text. Mask the encoded span when the decode hits a secret. Leave high_entropy opt-in: it also masks non-secrets and it skips hex, and it is off by default. Canary ids: base64-short, base64-long, base64-aws."
+    },
+    {
+      "id": "base64-long",
+      "category": "secret.base64",
+      "expect": "masked",
+      "family": "base64",
+      "value": "U1ZDTi1sb25nLWJhc2U2NC1zZWNyZXQtUTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4",
+      "rule": null,
+      "carrier": "U1ZDTi1sb25nLWJhc2U2NC1zZWNyZXQtUTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4",
+      "locations": [
+        "firmware/tundrahorn_fan.c"
+      ],
+      "severity": "high",
+      "repro": "firmware/tundrahorn_fan.c string blob_long, 232 characters, entropy above 4.5. high_entropy is false in the evaluated config.",
+      "fix": "Decode standard and URL-safe base64 spans of at least 16 characters and run the builtin secret rules on the decoded text. Mask the encoded span when the decode hits a secret. Leave high_entropy opt-in: it also masks non-secrets and it skips hex, and it is off by default. Canary ids: base64-short, base64-long, base64-aws."
+    },
+    {
+      "id": "base64-aws",
+      "category": "secret.base64",
+      "expect": "masked",
+      "family": "base64",
+      "value": "QUtJQVNWQ05FTkNPREVES0VZMDE=",
+      "rule": null,
+      "carrier": "QUtJQVNWQ05FTkNPREVES0VZMDE=",
+      "locations": [
+        "firmware/tundrahorn_fan.c"
+      ],
+      "severity": "high",
+      "repro": "firmware/tundrahorn_fan.c string encoded_key. Standard base64 of the fake key AKIASVCNENCODEDKEY01, which is not itself present in the corpus.",
+      "fix": "Decode standard and URL-safe base64 spans of at least 16 characters and run the builtin secret rules on the decoded text. Mask the encoded span when the decode hits a secret. Leave high_entropy opt-in: it also masks non-secrets and it skips hex, and it is off by default. Canary ids: base64-short, base64-long, base64-aws."
+    },
+    {
+      "id": "ipv4-10",
+      "category": "ip.v4",
+      "expect": "masked",
+      "family": "network",
+      "value": "10.44.7.15",
+      "rule": "ipv4",
+      "carrier": "10.44.7.15",
+      "locations": [
+        "firmware/tundrahorn_fan.c"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "ipv4-192",
+      "category": "ip.v4",
+      "expect": "masked",
+      "family": "network",
+      "value": "192.168.44.7",
+      "rule": "ipv4",
+      "carrier": "192.168.44.7",
+      "locations": [
+        "logs/boot.log"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "ipv4-172",
+      "category": "ip.v4",
+      "expect": "masked",
+      "family": "network",
+      "value": "172.16.44.7",
+      "rule": "ipv4",
+      "carrier": "172.16.44.7",
+      "locations": [
+        "logs/boot.log"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "ipv4-doc",
+      "category": "ip.v4",
+      "expect": "masked",
+      "family": "network",
+      "value": "203.0.113.44",
+      "rule": "ipv4",
+      "carrier": "203.0.113.44",
+      "locations": [
+        "logs/boot.log"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "ipv6-ula",
+      "category": "ip.v6",
+      "expect": "masked",
+      "family": "network",
+      "value": "fd7a:115c:a1e0::44",
+      "rule": "ipv6",
+      "carrier": "fd7a:115c:a1e0::44",
+      "locations": [
+        "firmware/tundrahorn_fan.c"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "ipv6-doc",
+      "category": "ip.v6",
+      "expect": "masked",
+      "family": "network",
+      "value": "2001:db8:44::15",
+      "rule": "ipv6",
+      "carrier": "2001:db8:44::15",
+      "locations": [
+        "logs/boot.log"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "host-wiki",
+      "category": "hostname.internal",
+      "expect": "masked",
+      "family": "network",
+      "value": "wiki.exempla.internal",
+      "rule": "internal-hostname",
+      "carrier": "wiki.exempla.internal",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "assets/badge.png"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "host-git",
+      "category": "hostname.internal",
+      "expect": "masked",
+      "family": "network",
+      "value": "git.tdh.corp",
+      "rule": "internal-hostname",
+      "carrier": "git.tdh.corp",
+      "locations": [
+        "deploy/Dockerfile",
+        "home/jdoe/.bash_history",
+        "logs/fan-error.log"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "host-plc",
+      "category": "hostname.internal",
+      "expect": "masked",
+      "family": "network",
+      "value": "plc.fan.lan",
+      "rule": "internal-hostname",
+      "carrier": "plc.fan.lan",
+      "locations": [
+        "firmware/tundrahorn_fan.c"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "host-db",
+      "category": "hostname.internal",
+      "expect": "masked",
+      "family": "network",
+      "value": "db.tundrahorn.corp",
+      "rule": "internal-hostname",
+      "carrier": "db.tundrahorn.corp",
+      "locations": [
+        "logs/fan-error.log",
+        "configs/fan.ini",
+        "home/jdoe/.bash_history",
+        "ops/agent-settings.json"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "host-artifacts",
+      "category": "hostname.internal",
+      "expect": "masked",
+      "family": "network",
+      "value": "artifacts.tdh.corp",
+      "rule": "internal-hostname",
+      "carrier": "artifacts.tdh.corp",
+      "locations": [
+        "dist/bundle.zip"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "email-fan",
+      "category": "pii.email",
+      "expect": "masked",
+      "family": "pii",
+      "value": "fan.operator@exempla.test",
+      "rule": "email",
+      "carrier": "fan.operator@exempla.test",
+      "locations": [
+        "logs/boot.log",
+        "docs/git-log.txt"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "email-kim",
+      "category": "pii.email",
+      "expect": "masked",
+      "family": "pii",
+      "value": "kim.exempel@exempla.invalid",
+      "rule": "email",
+      "carrier": "kim.exempel@exempla.invalid",
+      "locations": [
+        "logs/boot.log"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "email-pdf",
+      "category": "pii.email",
+      "expect": "masked",
+      "family": "pii",
+      "value": "pdf.author@exempla.test",
+      "rule": "email",
+      "carrier": "pdf.author@exempla.test",
+      "locations": [
+        "docs/manual.pdf"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "email-png",
+      "category": "pii.email",
+      "expect": "masked",
+      "family": "pii",
+      "value": "png.author@exempla.test",
+      "rule": "email",
+      "carrier": "png.author@exempla.test",
+      "locations": [
+        "assets/badge.png"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "email-zip",
+      "category": "pii.email",
+      "expect": "masked",
+      "family": "pii",
+      "value": "zip.comment@exempla.test",
+      "rule": "email",
+      "carrier": "zip.comment@exempla.test",
+      "locations": [
+        "dist/bundle.zip"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "phone-e164",
+      "category": "pii.phone",
+      "expect": "masked",
+      "family": "pii",
+      "value": "+46 70 000 11 22",
+      "rule": "phone-e164",
+      "carrier": "+46 70 000 11 22",
+      "locations": [
+        "logs/boot.log"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "phone-mobile",
+      "category": "pii.phone",
+      "expect": "masked",
+      "family": "pii",
+      "value": "070-000 11 22",
+      "rule": "phone-se",
+      "carrier": "070-000 11 22",
+      "locations": [
+        "logs/boot.log"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "phone-landline",
+      "category": "pii.phone",
+      "expect": "masked",
+      "family": "pii",
+      "value": "08-000 111 22",
+      "rule": "phone-se",
+      "carrier": "08-000 111 22",
+      "locations": [
+        "logs/boot.log"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "pn-12",
+      "category": "pii.personnummer",
+      "expect": "masked",
+      "family": "pii",
+      "value": "20990101-9993",
+      "rule": "personnummer",
+      "carrier": "20990101-9993",
+      "locations": [
+        "logs/boot.log"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "pn-sam",
+      "category": "pii.personnummer",
+      "expect": "masked",
+      "family": "pii",
+      "value": "20990161-9990",
+      "rule": "samordningsnummer",
+      "carrier": "20990161-9990",
+      "locations": [
+        "logs/boot.log"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "pn-10plus",
+      "category": "pii.personnummer",
+      "expect": "masked",
+      "family": "pii",
+      "value": "990101+9993",
+      "rule": "personnummer",
+      "carrier": "990101+9993",
+      "locations": [
+        "logs/boot.log"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "pn-json",
+      "category": "pii.personnummer",
+      "expect": "masked",
+      "family": "pii",
+      "value": "209903154475",
+      "rule": "personnummer",
+      "carrier": "209903154475",
+      "locations": [
+        "session:json-number"
+      ],
+      "severity": "high",
+      "repro": "POST /v1/responses with this 12-digit fictional 2099 personnummer as a JSON number, not a string (session json-number).",
+      "fix": "redact_value ignores JSON numbers, so a personnummer stored as a number bypasses the text rule. Scan the decimal spelling of numbers, or scan the raw JSON before parsing. Canary id: pn-json."
+    },
+    {
+      "id": "agent-pass",
+      "category": "secret.command-flag",
+      "expect": "visible",
+      "family": "gap",
+      "value": "SVCNAgentPassw0rd",
+      "rule": null,
+      "carrier": "SVCNAgentPassw0rd",
+      "locations": [
+        "ops/agent-settings.json",
+        "home/jdoe/.bash_history"
+      ],
+      "severity": "high",
+      "repro": "ops/agent-settings.json allowedCommands contains mysql -pSVCNAgentPassw0rd. The same line is in home/jdoe/.bash_history. Sent as a tool result.",
+      "fix": "No builtin covers a password glued to -p or --password. Add a secret rule for that flag, or document that shell snippets are out of scope. Canary id: agent-pass."
+    },
+    {
+      "id": "docker-opaque",
+      "category": "secret.docker-env-array",
+      "expect": "visible",
+      "family": "gap",
+      "value": "svcn-docker-opaque-0001",
+      "rule": null,
+      "carrier": "svcn-docker-opaque-0001",
+      "locations": [
+        "ops/docker-inspect.json"
+      ],
+      "severity": "high",
+      "repro": "ops/docker-inspect.json Env entry \"TDH_API_TOKEN=svcn-docker-opaque-0001\" (quote before the name). Sent as a tool result.",
+      "fix": "env-assignment requires the name at line start. Accept an optional quote before the name so docker inspect Env arrays match, or rescan after stripping one pair of quotes. Canary id: docker-opaque."
+    },
+    {
+      "id": "pytest-opaque",
+      "category": "secret.pytest-repr",
+      "expect": "visible",
+      "family": "gap",
+      "value": "svcn-pytest-opaque-0001",
+      "rule": null,
+      "carrier": "svcn-pytest-opaque-0001",
+      "locations": [
+        "ops/pytest-traceback.txt",
+        "docs/lab.ipynb"
+      ],
+      "severity": "high",
+      "repro": "ops/pytest-traceback.txt prints os.environ as environ({'TDH_DB_PASSWORD': 'svcn-pytest-opaque-0001'}). The notebook output cell repeats it.",
+      "fix": "A pytest repr is not an env line, and \\b does not hold between _ and PASSWORD. Recognize quoted names that end in _KEY, _SECRET, _TOKEN, _PASSWORD, or _PASS. Canary id: pytest-opaque."
+    },
+    {
+      "id": "split-left",
+      "category": "secret.split",
+      "expect": "visible",
+      "family": "gap",
+      "value": "AKIASVCNSPLIT",
+      "rule": null,
+      "carrier": "AKIASVCNSPLIT",
+      "locations": [
+        "firmware/tundrahorn_fan.c"
+      ],
+      "severity": "medium",
+      "repro": "firmware/tundrahorn_fan.c splits a fake key across adjacent string literals \"AKIASVCNSPLIT\" \"KEY001\". Neither fragment matches aws-access-key-id.",
+      "fix": "Regex detectors do not reassemble split tokens. Document that limit. A fix would have to join adjacent string literals before scanning, which this tree does not do."
+    },
+    {
+      "id": "split-right",
+      "category": "secret.split",
+      "expect": "visible",
+      "family": "gap",
+      "value": "KEY001",
+      "rule": null,
+      "carrier": "KEY001",
+      "locations": [
+        "firmware/tundrahorn_fan.c"
+      ],
+      "severity": "medium",
+      "repro": "Second half of the split fake key in firmware/tundrahorn_fan.c.",
+      "fix": "Same as split-left. KEY001 alone is not a secret shape; together with the previous literal it would be."
+    },
+    {
+      "id": "host-underscore",
+      "category": "hostname.underscore",
+      "expect": "masked",
+      "family": "gap",
+      "value": "db_backup.fan_line.internal",
+      "rule": "internal-hostname",
+      "carrier": "db_backup.fan_line.internal",
+      "locations": [
+        "firmware/tundrahorn_fan.c"
+      ],
+      "severity": "medium",
+      "repro": "Comment in firmware/tundrahorn_fan.c. Every label contains an underscore (db_backup.fan_line.internal), so internal-hostname does not match. A suffix without an underscore, such as tundrahorn.internal, is still masked.",
+      "fix": "internal-hostname labels are [a-z0-9-]. Allow underscores in labels. Canary id: host-underscore."
+    },
+    {
+      "id": "gitlab-bare",
+      "category": "secret.gitlab-pat",
+      "expect": "masked",
+      "family": "gap",
+      "value": "glpat-SVCNGITLABTOKEN0001",
+      "rule": "gitlab-pat",
+      "carrier": "glpat-SVCNGITLABTOKEN0001",
+      "locations": [
+        "firmware/tundrahorn_fan.c"
+      ],
+      "severity": "medium",
+      "repro": "Bare glpat- token in a firmware comment. GITLAB_TOKEN= in configs/fan.env is a different value and is an env assignment.",
+      "fix": "Add a builtin or a [[redact.secrets]] rule for \\bglpat-[A-Za-z0-9_-]{16,}\\b. Canary id: gitlab-bare."
+    },
+    {
+      "id": "azure-bare",
+      "category": "secret.azure-account-key",
+      "expect": "masked",
+      "family": "gap",
+      "value": "svcn-azure-bare-0001",
+      "rule": "azure-account-key",
+      "carrier": "AccountKey=svcn-azure-bare-0001",
+      "locations": [
+        "firmware/tundrahorn_fan.c"
+      ],
+      "severity": "medium",
+      "repro": "Comment AccountKey=svcn-azure-bare-0001 in firmware. AZURE_STORAGE_KEY= in fan.env is covered as an env assignment.",
+      "fix": "Add a rule for AccountKey= or document that only named env assignments are covered. Canary id: azure-bare."
+    },
+    {
+      "id": "slack-long",
+      "category": "secret.slack-overlong",
+      "expect": "masked",
+      "family": "gap",
+      "value": "xoxb-SVCNSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS",
+      "rule": "slack-token",
+      "carrier": "xoxb-SVCNSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS",
+      "locations": [
+        "firmware/tundrahorn_fan.c"
+      ],
+      "severity": "medium",
+      "repro": "xoxb- token whose body is 49 characters. The builtin allows 10 to 48.",
+      "fix": "Raise the slack-token upper bound. Canary id: slack-long."
+    },
+    {
+      "id": "sk-admin",
+      "category": "secret.sk-admin",
+      "expect": "masked",
+      "family": "exception",
+      "value": "sk-admin-SVCNadminKey00000000000000000000",
+      "rule": "openai-api-key",
+      "carrier": "sk-admin-SVCNadminKey00000000000000000000",
+      "locations": [
+        "firmware/tundrahorn_fan.c"
+      ],
+      "severity": "info",
+      "repro": "sk-admin- token in a firmware comment. README says this shape is not covered.",
+      "fix": "Documented exception. Add sk-admin- and sk-svcacct- to openai-api-key if they should be masked. Canary id: sk-admin."
+    },
+    {
+      "id": "company-exempla",
+      "category": "name.company",
+      "expect": "masked",
+      "family": "work-code-name",
+      "value": "Exempla",
+      "rule": "name-term",
+      "carrier": "Exempla",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "docs/notes.md",
+        "docs/git-log.txt",
+        "dist/bundle.zip"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "company-tundrahorn",
+      "category": "name.company",
+      "expect": "masked",
+      "family": "work-code-name",
+      "value": "Tundrahorn",
+      "rule": "name-term",
+      "carrier": "Tundrahorn",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "docs/manual.pdf",
+        "docs/git-log.txt"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "inflection-exemplas",
+      "category": "name.inflection",
+      "expect": "masked",
+      "family": "work-code-name",
+      "value": "Exemplas",
+      "rule": "name-term",
+      "carrier": "Exemplas",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "docs/notes.md"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "case-upper",
+      "category": "name.case-variant",
+      "expect": "masked",
+      "family": "work-code-name",
+      "value": "EXEMPLA",
+      "rule": "name-term",
+      "carrier": "EXEMPLA",
+      "locations": [
+        "docs/notes.md"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "case-suffix",
+      "category": "name.case-variant",
+      "expect": "masked",
+      "family": "work-code-name",
+      "value": "exempla_",
+      "rule": "name-term",
+      "carrier": "exempla_",
+      "locations": [
+        "docs/notes.md"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "case-split",
+      "category": "name.case-variant",
+      "expect": "masked",
+      "family": "work-code-name",
+      "value": "Exem-pla",
+      "rule": "name-term",
+      "carrier": "Exem-pla",
+      "locations": [
+        "docs/notes.md"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "code-fn",
+      "category": "name.code",
+      "expect": "masked",
+      "family": "work-code-name",
+      "value": "tundrahorn_fan_init",
+      "rule": "name-term",
+      "carrier": "tundrahorn_fan_init",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "firmware/tundrahorn_fan.h",
+        "services/bridge/main.go"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "code-macro",
+      "category": "name.code",
+      "expect": "masked",
+      "family": "work-code-name",
+      "value": "TDH_FAN_MAX",
+      "rule": "name-term",
+      "carrier": "TDH_FAN_MAX",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "firmware/tundrahorn_fan.h",
+        "firmware/Kconfig"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "product-tdh",
+      "category": "name.product-code",
+      "expect": "masked",
+      "family": "work-code-name",
+      "value": "TDH-4471",
+      "rule": "tdh-code",
+      "carrier": "TDH-4471",
+      "locations": [
+        "configs/fan.yaml",
+        "docs/git-log.txt"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "product-fan",
+      "category": "name.product-code",
+      "expect": "masked",
+      "family": "work-code-name",
+      "value": "FAN-ALPHA-2",
+      "rule": "fan-code",
+      "carrier": "FAN-ALPHA-2",
+      "locations": [
+        "firmware/tundrahorn_fan.h"
+      ],
+      "severity": "high",
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "person-ren",
+      "category": "name.person",
+      "expect": "visible",
+      "family": "person-name",
+      "value": "Ren Testdotter",
+      "rule": null,
+      "carrier": "Ren Testdotter",
+      "locations": [
+        "docs/git-log.txt",
+        "docs/notes.md"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "path-home",
+      "category": "path.home",
+      "expect": "visible",
+      "family": "path",
+      "value": "/home/jdoe/exempla/build",
+      "rule": null,
+      "carrier": "/home/jdoe/exempla/build",
+      "locations": [
+        "home/jdoe/.bash_history"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "filename-fan",
+      "category": "path.filename",
+      "expect": "visible",
+      "family": "path",
+      "value": "tundrahorn_fan.c",
+      "rule": null,
+      "carrier": "tundrahorn_fan.c",
+      "locations": [
+        "docs/git-status.txt"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "dirname-tundrahorn",
+      "category": "path.dirname",
+      "expect": "visible",
+      "family": "path",
+      "value": "tundrahorn",
+      "rule": null,
+      "carrier": "tundrahorn",
+      "locations": [
+        "tundrahorn/README.md",
+        "docs/git-status.txt"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "keep-loopback",
+      "category": "keep",
+      "expect": "keep",
+      "family": "keep",
+      "value": "keep 127.0.0.1 local",
+      "rule": null,
+      "carrier": "keep 127.0.0.1 local",
+      "locations": [
+        "logs/boot.log"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "keep-ipv6-loop",
+      "category": "keep",
+      "expect": "keep",
+      "family": "keep",
+      "value": "loopback ::1 stays",
+      "rule": null,
+      "carrier": "loopback ::1 stays",
+      "locations": [
+        "logs/boot.log"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "keep-std-env",
+      "category": "keep",
+      "expect": "keep",
+      "family": "keep",
+      "value": "std::env::var",
+      "rule": null,
+      "carrier": "std::env::var",
+      "locations": [
+        "services/fanctl/src/main.rs"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "keep-token-limit",
+      "category": "keep",
+      "expect": "keep",
+      "family": "keep",
+      "value": "TOKEN_LIMIT=4096",
+      "rule": null,
+      "carrier": "TOKEN_LIMIT=4096",
+      "locations": [
+        "configs/fan.env"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "keep-changeme",
+      "category": "keep",
+      "expect": "keep",
+      "family": "keep",
+      "value": "password = \"changeme\"",
+      "rule": null,
+      "carrier": "password = \"changeme\"",
+      "locations": [
+        "configs/fan.env"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "keep-short-pw",
+      "category": "keep",
+      "expect": "keep",
+      "family": "keep",
+      "value": "password = \"abc12xy\"",
+      "rule": null,
+      "carrier": "password = \"abc12xy\"",
+      "locations": [
+        "configs/fan.env"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "keep-numeric-env",
+      "category": "keep",
+      "expect": "keep",
+      "family": "keep",
+      "value": "TDH_API_KEY=12345678",
+      "rule": null,
+      "carrier": "TDH_API_KEY=12345678",
+      "locations": [
+        "configs/fan.env"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "keep-dotted-version",
+      "category": "keep",
+      "expect": "keep",
+      "family": "keep",
+      "value": "+1.2.3",
+      "rule": null,
+      "carrier": "+1.2.3",
+      "locations": [
+        "logs/fan-error.log"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "keep-scp-path",
+      "category": "keep",
+      "expect": "keep",
+      "family": "keep",
+      "value": "firmware/fan.git",
+      "rule": null,
+      "carrier": "firmware/fan.git",
+      "locations": [
+        "logs/fan-error.log"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "keep-localhost-mail",
+      "category": "keep",
+      "expect": "keep",
+      "family": "keep",
+      "value": "build@localhost",
+      "rule": null,
+      "carrier": "build@localhost",
+      "locations": [
+        "logs/fan-error.log"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "keep-user-host",
+      "category": "keep",
+      "expect": "keep",
+      "family": "keep",
+      "value": "planner@box",
+      "rule": null,
+      "carrier": "planner@box",
+      "locations": [
+        "logs/fan-error.log"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "benign-flakt",
+      "category": "benign",
+      "expect": "keep",
+      "family": "benign",
+      "value": "fläkt",
+      "rule": null,
+      "carrier": "fläkt",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "docs/notes.md"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "benign-exempel",
+      "category": "benign",
+      "expect": "keep",
+      "family": "benign",
+      "value": "exempel",
+      "rule": null,
+      "carrier": "exempel",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "docs/notes.md"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "benign-klocka",
+      "category": "benign",
+      "expect": "keep",
+      "family": "benign",
+      "value": "klocka",
+      "rule": null,
+      "carrier": "klocka",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "docs/notes.md"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "benign-morgon",
+      "category": "benign",
+      "expect": "keep",
+      "family": "benign",
+      "value": "morgon",
+      "rule": null,
+      "carrier": "morgon",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "docs/notes.md"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "benign-vanlig",
+      "category": "benign",
+      "expect": "keep",
+      "family": "benign",
+      "value": "vanlig",
+      "rule": null,
+      "carrier": "vanlig",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "docs/notes.md"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "benign-arbete",
+      "category": "benign",
+      "expect": "keep",
+      "family": "benign",
+      "value": "arbete",
+      "rule": null,
+      "carrier": "arbete",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "docs/notes.md"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "benign-fonster",
+      "category": "benign",
+      "expect": "keep",
+      "family": "benign",
+      "value": "fönster",
+      "rule": null,
+      "carrier": "fönster",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "docs/notes.md"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "benign-trad",
+      "category": "benign",
+      "expect": "keep",
+      "family": "benign",
+      "value": "träd",
+      "rule": null,
+      "carrier": "träd",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "docs/notes.md"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "benign-vatten",
+      "category": "benign",
+      "expect": "keep",
+      "family": "benign",
+      "value": "vatten",
+      "rule": null,
+      "carrier": "vatten",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "docs/notes.md"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "benign-skola",
+      "category": "benign",
+      "expect": "keep",
+      "family": "benign",
+      "value": "skola",
+      "rule": null,
+      "carrier": "skola",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "docs/notes.md"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "benign-troskel",
+      "category": "benign",
+      "expect": "keep",
+      "family": "benign",
+      "value": "tröskel",
+      "rule": null,
+      "carrier": "tröskel",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "docs/notes.md"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "benign-sensor",
+      "category": "benign",
+      "expect": "keep",
+      "family": "benign",
+      "value": "sensor",
+      "rule": null,
+      "carrier": "sensor",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "docs/notes.md"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "benign-compile",
+      "category": "benign",
+      "expect": "keep",
+      "family": "benign",
+      "value": "compile",
+      "rule": null,
+      "carrier": "compile",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "docs/notes.md"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    },
+    {
+      "id": "benign-threshold",
+      "category": "benign",
+      "expect": "keep",
+      "family": "benign",
+      "value": "threshold",
+      "rule": null,
+      "carrier": "threshold",
+      "locations": [
+        "firmware/tundrahorn_fan.c",
+        "docs/notes.md"
+      ],
+      "severity": null,
+      "repro": null,
+      "fix": null
+    }
+  ],
+  "files": [
+    {
+      "path": "firmware/tundrahorn_fan.c",
+      "kind": "text",
+      "body": "/* FAKE firmware. Fictional company Exempla, product Tundrahorn.\n * Exemplas fläkt startar vid tröskel. exempel klocka morgon vanlig arbete\n * fönster träd vatten skola. sensor threshold during compile.\n */\n#include \"tundrahorn_fan.h\"\n\n#define TDH_FAN_MAX 2400\n\nstatic const char *banner = \"Tundrahorn\";\nstatic const char *debug_key = \"AKIASVCNCANARYKEY001\";\nstatic const char *blob = \"U1ZDTi1iYXNlNjQtcGxhaW50ZXh0LXNlY3JldC0wMDAx\";\nstatic const char *blob_long = \"U1ZDTi1sb25nLWJhc2U2NC1zZWNyZXQtUTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4\";\nstatic const char *encoded_key = \"QUtJQVNWQ05FTkNPREVES0VZMDE=\";\nstatic const char *split =\n    \"AKIASVCNSPLIT\"\n    \"KEY001\";\n\nvoid tundrahorn_fan_init(void) {\n    /* broker wiki.exempla.internal and plc.fan.lan */\n    /* http://10.44.7.15/status */\n    /* http://[fd7a:115c:a1e0::44]/fan */\n}\n\n/* underscore host db_backup.fan_line.internal */\n/* overlong slack xoxb-SVCNSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS */\n/* bare gitlab glpat-SVCNGITLABTOKEN0001 */\n/* sk-admin documented exception sk-admin-SVCNadminKey00000000000000000000 */\n/* AccountKey=svcn-azure-bare-0001 */\n"
+    },
+    {
+      "path": "firmware/tundrahorn_fan.h",
+      "kind": "text",
+      "body": "/* FAKE header for FAN-ALPHA-2. */\n#pragma once\n#define TDH_FAN_MAX 2400\nvoid tundrahorn_fan_init(void);\n"
+    },
+    {
+      "path": "firmware/tundrahorn.dts",
+      "kind": "text",
+      "body": "/dts-v1/;\n/* FAKE device tree for Tundrahorn. */\n/ {\n    model = \"Tundrahorn\";\n    compatible = \"exempla,tundrahorn-fan\";\n};\n"
+    },
+    {
+      "path": "firmware/CMakeLists.txt",
+      "kind": "text",
+      "body": "cmake_minimum_required(VERSION 3.16)\nproject(tundrahorn_fan C)\nadd_library(fan tundrahorn_fan.c)\n"
+    },
+    {
+      "path": "firmware/Makefile",
+      "kind": "text",
+      "body": "# FAKE makefile\nCC ?= cc\nall: tundrahorn_fan.o\n"
+    },
+    {
+      "path": "firmware/Kconfig",
+      "kind": "text",
+      "body": "config TDH_FAN_MAX\n    int \"fan ceiling\"\n    default 2400\n    help\n      FAKE Tundrahorn limit for Exempla.\n"
+    },
+    {
+      "path": "tundrahorn/README.md",
+      "kind": "text",
+      "body": "# tundrahorn\n\nFAKE directory name for the fictional product. Not a real repository.\n"
+    },
+    {
+      "path": "tools/fan_check.py",
+      "kind": "text",
+      "body": "# FAKE tooling for Tundrahorn.\nGOOGLE = \"AIzaSVCNGOOGLEKEY0000000000000000000000\"\nFACTORY = \"tdh_live_SVCNFACTORYTOKEN1\"\n\n\ndef main() -> None:\n    print(\"fläkt\")\n\n\nif __name__ == \"__main__\":\n    main()\n"
+    },
+    {
+      "path": "tools/test_fan.py",
+      "kind": "text",
+      "body": "# FAKE test. The saved traceback is ops/pytest-traceback.txt.\nimport os\n\n\ndef test_env_shape() -> None:\n    print(os.environ)\n    assert os.environ.get(\"TDH_DB_PASSWORD\")\n"
+    },
+    {
+      "path": "services/fanctl/src/main.rs",
+      "kind": "text",
+      "body": "//! FAKE service. Not part of the SymVeil workspace.\nfn main() {\n    let _ = std::env::var(\"TOKEN_LIMIT\");\n    let _anthropic = \"sk-ant-SVCNanthropickey00000000\";\n    let _jwt = \"eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZGgtdGVzdCJ9.SVCNJWT0000000000\";\n    let _jwt_long = \"eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZGgtdGVzdCJ9.SVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONGSVCNJWTLONG\";\n}\n"
+    },
+    {
+      "path": "services/bridge/main.go",
+      "kind": "text",
+      "body": "// FAKE Go bridge. Calls tundrahorn_fan_init from the fictional firmware.\npackage main\n\nfunc main() {\n    stripe := \"sk_live_SVCNSTRIPEKEY00000000000\"\n    _ = stripe\n}\n"
+    },
+    {
+      "path": "deploy/Dockerfile",
+      "kind": "text",
+      "body": "# FAKE image. Not a real registry and not a real base.\nFROM scratch\nENV OPENAI_API_KEY=sk-proj-SVCNopenaiprojectkey000000000000\nLABEL org.fake=\"Exempla Tundrahorn\"\n# mirror git.tdh.corp\n"
+    },
+    {
+      "path": "ci/fan.yml",
+      "kind": "text",
+      "body": "# FAKE workflow. Not the workflow of this repository.\nname: fan\non: [push]\njobs:\n  build:\n    runs-on: fake-runner\n    steps:\n      - run: echo Tundrahorn\n        env:\n          GH_FINE: github_pat_SVCNFINEGRAINED0000000_SVCNFGPAYLOAD0000000000000000000000000000000000000000000000\n"
+    },
+    {
+      "path": "configs/fan.env",
+      "kind": "text",
+      "body": "# FAKE environment file\nTDH_DB_PASSWORD=svcn-env-unquoted-0001\nexport TDH_API_SECRET=\"svcn-env-quoted-0001\"\nTDH_DB_PASS=svcn:pass/word!9\nTDH_API_KEY=\"svcn\\pass0001\"\nTDH_LONG_SECRET=\"SVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONGSVCNLONG\"\nAZURE_STORAGE_KEY=svcn-azure-storage-0001\nGITLAB_TOKEN=svcn-gitlab-env-0001\nTOKEN_LIMIT=4096\nTDH_API_KEY=12345678\npassword = \"changeme\"\npassword = \"abc12xy\"\n"
+    },
+    {
+      "path": "configs/fan.ini",
+      "kind": "text",
+      "body": "[broker]\npassword = \"svcn-ini-password-0001\"\nhost = db.tundrahorn.corp\n"
+    },
+    {
+      "path": "configs/fan.toml",
+      "kind": "text",
+      "body": "token = \"svcn-toml-token-0001\"\nproduct = \"Tundrahorn\"\n"
+    },
+    {
+      "path": "configs/fan.yaml",
+      "kind": "text",
+      "body": "api_key: \"svcn-yaml-apikey-0001\"\ncode: TDH-4471\nslack: \"xoxb-SVCNSlackTok01\"\n"
+    },
+    {
+      "path": "configs/fan.json",
+      "kind": "text",
+      "body": "{\"password\": \"svcn-json-password-0001\", \"note\": \"fläkt\", \"product\": \"Tundrahorn\"}\n"
+    },
+    {
+      "path": "configs/fake-key.pem",
+      "kind": "text",
+      "body": "-----BEGIN PRIVATE KEY-----\nSVCNPRIVATEKEYLINE0001\n-----END PRIVATE KEY-----\n"
+    },
+    {
+      "path": "configs/fake-openssh.key",
+      "kind": "text",
+      "body": "-----BEGIN OPENSSH PRIVATE KEY-----\nSVCNOPENSSHKEYLINE0001\n-----END OPENSSH PRIVATE KEY-----\n"
+    },
+    {
+      "path": "docs/lab.ipynb",
+      "kind": "text",
+      "body": "{\n  \"nbformat\": 4,\n  \"nbformat_minor\": 5,\n  \"metadata\": {\n    \"kernelspec\": {\n      \"display_name\": \"Python 3\",\n      \"name\": \"python3\"\n    }\n  },\n  \"cells\": [\n    {\n      \"cell_type\": \"markdown\",\n      \"metadata\": {},\n      \"source\": [\n        \"FAKE lab notes for Tundrahorn. Exempla is fictional.\\n\"\n      ]\n    },\n    {\n      \"cell_type\": \"code\",\n      \"execution_count\": 1,\n      \"metadata\": {},\n      \"outputs\": [\n        {\n          \"name\": \"stdout\",\n          \"output_type\": \"stream\",\n          \"text\": [\n            \"environ({'TDH_DB_PASSWORD': 'svcn-pytest-opaque-0001'})\\n\"\n          ]\n        }\n      ],\n      \"source\": [\n        \"import os\\n\",\n        \"print(os.environ)\\n\",\n        \"debug_key = \\\"AKIASVCNCANARYKEY001\\\"\\n\"\n      ]\n    }\n  ]\n}\n"
+    },
+    {
+      "path": "ops/printenv.txt",
+      "kind": "text",
+      "body": "PATH=/usr/bin\nTDH_API_KEY=svcn-printenv-value-0001\nHOME=/home/jdoe\nNOTE=fläkt\n"
+    },
+    {
+      "path": "ops/docker-inspect.json",
+      "kind": "text",
+      "body": "{\n  \"Id\": \"fake\",\n  \"Config\": {\n    \"Env\": [\n      \"TDH_API_TOKEN=svcn-docker-opaque-0001\",\n      \"AWS_ACCESS_KEY_ID=AKIASVCNCANARYKEY001\",\n      \"PATH=/usr/bin\"\n    ]\n  }\n}\n"
+    },
+    {
+      "path": "ops/pytest-traceback.txt",
+      "kind": "text",
+      "body": "________________ test_env_shape ________________\n>       print(os.environ)\nE       AssertionError\nos.environ = environ({'AWS_ACCESS_KEY_ID': 'AKIASVCNCANARYKEY001', 'TDH_DB_PASSWORD': 'svcn-pytest-opaque-0001'})\ntools/test_fan.py:8: AssertionError\n"
+    },
+    {
+      "path": "home/jdoe/.bash_history",
+      "kind": "text",
+      "body": "cd /home/jdoe/exempla/build\ncurl -H \"Authorization: Bearer ghp_SVCNGITHUBPAT00000000000000000000000\" https://git.tdh.corp/fan\nmysql -h db.tundrahorn.corp -pSVCNAgentPassw0rd\nexport OPENAI_API_KEY=sk-SVCNopenaiLEGACYKEY00000000000000000000000000000\n"
+    },
+    {
+      "path": "ops/agent-settings.json",
+      "kind": "text",
+      "body": "{\n  \"name\": \"fake-agent\",\n  \"allowedCommands\": [\n    \"mysql -h db.tundrahorn.corp -pSVCNAgentPassw0rd\",\n    \"echo fläkt\"\n  ]\n}\n"
+    },
+    {
+      "path": "logs/fan-error.log",
+      "kind": "text",
+      "body": "Error: connect postgres://fan_svc:s3cretSVCN:with:colon@db.tundrahorn.corp:5432/fan failed\nversion +1.2.3 stays\nbuild@localhost\nplanner@box\ngit@git.tdh.corp:firmware/fan.git\n"
+    },
+    {
+      "path": "logs/boot.log",
+      "kind": "text",
+      "body": "FAKE boot log\nlink 192.168.44.7 172.16.44.7 doc 203.0.113.44 v6 2001:db8:44::15\nkeep 127.0.0.1 local\nloopback ::1 stays\nphone +46 70 000 11 22 and 070-000 11 22 and 08-000 111 22\nid 20990101-9993 and 20990161-9990 and 990101+9993\nmail fan.operator@exempla.test and kim.exempel@exempla.invalid\n"
+    },
+    {
+      "path": "docs/notes.md",
+      "kind": "text",
+      "body": "# FAKE notes\n\nExemplas fläkt startar vid tröskel. exempel klocka morgon vanlig arbete fönster träd vatten skola.\nThe compile stays under the sensor threshold.\n\nCase forms that are not the dictionary word: EXEMPLA, exempla_, Exem-pla.\nPerson in the log: Ren Testdotter. Company: Exempla. Product: Tundrahorn.\n"
+    },
+    {
+      "path": "docs/git-log.txt",
+      "kind": "text",
+      "body": "commit 0000000000000000000000000000000000000001\nAuthor: Ren Testdotter <fan.operator@exempla.test>\nDate:   Thu Jan 1 00:00:00 2099 +0000\n\n    TDH-4471: start Tundrahorn fan on Exempla line\n"
+    },
+    {
+      "path": "docs/git-status.txt",
+      "kind": "text",
+      "body": "On branch fake\n        modified:   firmware/tundrahorn_fan.c\n        new file:   tundrahorn/README.md\n"
+    },
+    {
+      "path": "assets/badge.png",
+      "kind": "png",
+      "chunks": [
+        {
+          "keyword": "Author",
+          "text": "png.author@exempla.test"
+        },
+        {
+          "keyword": "Comment",
+          "text": "wiki.exempla.internal"
+        }
+      ]
+    },
+    {
+      "path": "docs/manual.pdf",
+      "kind": "pdf",
+      "author": "pdf.author@exempla.test",
+      "title": "Tundrahorn fan notes"
+    },
+    {
+      "path": "dist/bundle.zip",
+      "kind": "zip",
+      "comment": "zip.comment@exempla.test artifacts.tdh.corp",
+      "entry_name": "README.txt",
+      "entry_text": "fläkt\nExempla line\n"
+    }
+  ]
+}

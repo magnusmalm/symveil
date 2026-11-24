@@ -1,0 +1,4 @@
+{
+  "description": "Benign strings the free build is allowed to mask. A new id, or a higher count, fails the run. Empty means ordinary words must survive.",
+  "masked_ids": []
+}

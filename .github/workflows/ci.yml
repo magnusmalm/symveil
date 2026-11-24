@@ -17,4 +17,8 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -- --skip leak_measurement
+      # Fails while a gated canary still reaches the mock. The Markdown
+      # report in the log is the measurement. Do not skip the test to make it green.
+      - name: leak test
+        run: cargo test --test leak_harness --locked leak_measurement -- --nocapture
