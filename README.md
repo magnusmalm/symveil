@@ -8,7 +8,7 @@ SymVeil is a local proxy that sits between a coding agent and a cloud model. Thi
 
 The vault and the audit log stay on the machine. The vault file is encrypted; the key sits next to it. Upstream sees placeholders of the form `@@sv:0123abcd@@` instead of the secret.
 
-The free tier masks secrets. Pro identifier and code-name masking is at [symveil.dev](https://symveil.dev).
+The free tier masks secrets, and company, product, and project names listed in `[redact.names]`. The identifier index is the Pro plugin at [symveil.dev](https://symveil.dev).
 
 ## What it masks
 
@@ -35,6 +35,8 @@ Builtin rules, always on:
 Assignment and URL-password values shorter than 8 characters, all-numeric assignment values, and whole-value placeholders such as `changeme`, `password`, and `${VAR}` are left in place. A longer secret that merely contains one of those words is masked. `TOKEN_LIMIT=4096` is not treated as a secret name. A secret-shaped name mentioned mid-line is not an assignment. `sk-ant-` stays on the Anthropic rule.
 
 It also masks IPv4 and IPv6 addresses (keeping `127.0.0.1`, `0.0.0.0`, `255.255.255.255`, and `::1`) and hostnames under the configured internal domains, including a label that contains `_`. An address has to stand on its own, so a Rust path such as `std::env` is left alone. Add your own secret rules under `[[redact.secrets]]`. The name has to be one you choose: a name that matches a builtin detector is rejected at startup.
+
+`[redact.names]` masks a list of terms and project-code regexes. A term is matched case-insensitively, with `-`, `_`, or `.` between letters, and with a Swedish genitive `-s` or a common suffix (`-en`, `-et`, `-ar`, `-or`, `-er`, and the definite plurals). `Exempla` matches `EXEMPLA`, `exempla_`, `Exem-pla`, and `Exemplas`. It does not match `exempel`. A term needs at least three letters or digits, so `TDH` matches `TDH_FAN_MAX` and does not match inside an unrelated word. A regex such as `TDH-\d+` is used as written. The placeholder restores to the exact matched text. Usernames and whole paths are not a separate rule: a path is masked only where a configured term appears. The `deny` list and `patterns` list are still the identifier plugin's inputs and do nothing in this build.
 
 Each rule has an action. `redact` is the default: the proxy replaces the match and restores it in the response. `warn` forwards the original, writes an audit entry, and logs a warning. `block` returns HTTP 400 and does not call upstream. A config that omits `action` keeps the `redact` behavior.
 

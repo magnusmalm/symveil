@@ -6,6 +6,7 @@ use serde_json::Value;
 use crate::category::Category;
 use crate::config::{Action, Mode, RedactSection};
 use crate::masker::{Boundary, Candidate, Masker};
+use crate::names::NameMasker;
 use crate::pii::PiiMasker;
 use crate::scan::NetworkMasker;
 use crate::secrets::SecretMasker;
@@ -69,6 +70,9 @@ impl Engine {
         maskers.push(Box::new(NetworkMasker::compile(&redact.internal_domains)?));
         if redact.pii.enabled() {
             maskers.push(Box::new(PiiMasker::compile(&redact.pii)));
+        }
+        if redact.names.enabled() {
+            maskers.push(Box::new(NameMasker::compile(&redact.names)?));
         }
         maskers.extend(extra);
         Ok(Self {
