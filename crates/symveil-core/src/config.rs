@@ -241,6 +241,10 @@ pub struct RedactSection {
     pub patterns: Vec<UserPattern>,
     #[serde(default)]
     pub secrets: Vec<SecretRule>,
+    /// Scan long high-entropy tokens that no builtin names. Off by default:
+    /// mixed base64 blobs that are not credentials still match.
+    #[serde(default)]
+    pub high_entropy: bool,
 }
 
 impl Default for RedactSection {
@@ -254,6 +258,7 @@ impl Default for RedactSection {
             builtin_actions: HashMap::new(),
             patterns: Vec::new(),
             secrets: Vec::new(),
+            high_entropy: false,
         }
     }
 }
@@ -378,6 +383,13 @@ mod tests {
         assert_eq!(cfg.redact.mode, Mode::Enforce);
         assert!(cfg.redact.secrets.is_empty());
         assert!(cfg.redact.builtin_actions.is_empty());
+        assert!(!cfg.redact.high_entropy);
+    }
+
+    #[test]
+    fn high_entropy_can_be_enabled() {
+        let cfg: Config = toml::from_str("[redact]\nhigh_entropy = true\n").unwrap();
+        assert!(cfg.redact.high_entropy);
     }
 
     #[test]

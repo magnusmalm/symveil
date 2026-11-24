@@ -20,11 +20,20 @@ Builtin rules, always on:
 - Google API keys
 - Stripe live secrets
 - PEM private keys
-- `api_key`, `secret`, `token`, and `password` assignments
+- Quoted `api_key`, `apikey`, `secret`, `token`, and `password` assignments (the value only), including `"password": "…"` when that object is text inside a string
+- `.env` assignments whose names are uppercase and end in `_KEY`, `_SECRET`, `_TOKEN`, `_PASSWORD`, or `_PASS`. A leading `export`, spaces around `=`, single or double quotes, and a trailing `#` comment are recognized. An unquoted value may contain spaces and runs until that comment. Only the value is masked.
+- OpenAI keys: `sk-` plus 48 alphanumeric characters, and `sk-proj-` keys
+- Anthropic keys that start with `sk-ant-`
+- JWTs with three base64url segments, with or without `=` padding, and a header starting with `eyJ`
+- The password in a URL with userinfo (`scheme://user:password@host`), including a password that contains `:`. The user and host stay.
 
-It also masks IPv4 and IPv6 addresses (keeping `127.0.0.1`, `0.0.0.0`, `255.255.255.255`, and `::1`) and hostnames under the configured internal domains. Add your own secret rules under `[[redact.secrets]]`. The name has to be one you choose: a name that matches a builtin detector is rejected at startup.
+Assignment and URL-password values shorter than 8 characters, all-numeric assignment values, and whole-value placeholders such as `changeme`, `password`, and `${VAR}` are left in place. A longer secret that merely contains one of those words is masked. `TOKEN_LIMIT=4096` is not treated as a secret name. A secret-shaped name mentioned mid-line is not an assignment. `sk-admin-` and `sk-svcacct-` keys are not covered.
+
+It also masks IPv4 and IPv6 addresses (keeping `127.0.0.1`, `0.0.0.0`, `255.255.255.255`, and `::1`) and hostnames under the configured internal domains. An address has to stand on its own, so a Rust path such as `std::env` is left alone. Add your own secret rules under `[[redact.secrets]]`. The name has to be one you choose: a name that matches a builtin detector is rejected at startup.
 
 Each rule has an action. `redact` is the default: the proxy replaces the match and restores it in the response. `warn` forwards the original, writes an audit entry, and logs a warning. `block` returns HTTP 400 and does not call upstream. A config that omits `action` keeps the `redact` behavior.
+
+Set `high_entropy = true` under `[redact]` to also mask tokens of 32 to 4096 characters whose Shannon entropy is at least 4.5 bits per character. It is off by default. Hex strings, UUIDs, and tokens that start with `sha1-`, `sha256-`, `sha384-`, or `sha512-` are skipped. Other long base64 blobs are still masked, which is why the switch stays off.
 
 An allow entry does not exempt a secret.
 
@@ -74,8 +83,6 @@ Checked with Grok Build 1.0.52 (`grok`) and a local mock upstream that recorded 
 > **Session titles call xAI directly unless you reroute them.** Grok Build's session-title generation calls `https://cli-chat-proxy.grok.com` directly (observed with `grok-4.6` on `POST /v1/responses`). That request ignores the custom `base_url` and bypasses SymVeil, so the start of the prompt may reach xAI unredacted. With a stand-in key the call returned 401 and still left the machine.
 >
 > No setting was found that disables this first title call. `features.title_refresh` and `GROK_TITLE_REFRESH` control a later refresh of an existing title. The docs and the 1.0.52 source (`models.session_summary`, env `GROK_SESSION_SUMMARY_MODEL`) select the model used for the title. Point that at the SymVeil custom model, as in the `config.toml` example. With `session_summary` set to that model, the mock recorded the title `POST /v1/responses` on the SymVeil base as `grok-4.7`, the secret in that body was already an `@@sv:…@@` placeholder, and grok made no request to `cli-chat-proxy.grok.com`.
-
-**Known limitation.** When a tool-argument stream splits one `@@sv:…@@` placeholder across two JSON fragments, Grok may concatenate it unrestored. A placeholder split only by HTTP chunk boundaries, inside one JSON value, was restored. On the Responses path the completed event carried the arguments in one piece, and those were restored.
 
 `responses` and `chat_completions` follow `--openai-base`. `messages` follows `--anthropic-base`. `GET /v1/models` follows `--openai-base`. Origins have no trailing `/v1`. The check pointed the two flags at two different mocks so the routes stayed distinct. Grok 4.7 used the Responses API.
 
@@ -180,7 +187,7 @@ action = "warn"
 
 `action` is `redact`, `warn`, or `block`. Leave it out to redact. An explicit action on a `[[redact.secrets]]` rule applies to that rule. It does not change a builtin detector. Startup fails if a custom rule's name matches a builtin detector name, and the error names the rule and tells you to rename it. Change a builtin's action in `[redact.builtin]`. A `block` match blocks the request even when a wider `warn` or `redact` span covers the same bytes. `mode = "observe"` forces warn for every match, including rules set to block, so a repo can be tried before anything is masked or refused.
 
-Builtin detector names: `aws-access-key-id`, `github-pat`, `github-fine-grained-pat`, `slack-token`, `google-api-key`, `stripe-live-secret`, `private-key`, `generic-api-key`, `ipv4`, `ipv6`, `internal-hostname`. Category names: `secret`, `ip`, `hostname`. An unknown action, mode, category, or builtin name fails at startup and names the values that are accepted.
+Builtin detector names: `aws-access-key-id`, `github-pat`, `github-fine-grained-pat`, `slack-token`, `google-api-key`, `stripe-live-secret`, `openai-api-key`, `anthropic-api-key`, `jwt`, `url-password`, `private-key`, `generic-api-key`, `env-assignment`, `env-quoted-assignment`, `ipv4`, `ipv6`, `internal-hostname`. Category names: `secret`, `ip`, `hostname`. An unknown action, mode, category, or builtin name fails at startup and names the values that are accepted.
 
 `block` responds with HTTP 400 and does not contact upstream. The response sets `x-should-retry: false`. `POST /v1/messages` returns an Anthropic error object: `type` is `error`, `error.type` is `invalid_request_error`, and the same sentence is repeated in the top-level `message` and in `error.message`. Other `/v1/*` routes return an OpenAI error object: `error.type` is `invalid_request_error` and `error.code` is `symveil_blocked`. The sentence names the rule and the length. It does not include the matched secret.
 
