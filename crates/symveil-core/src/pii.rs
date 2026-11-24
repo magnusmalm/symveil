@@ -2,7 +2,8 @@
 //! personnummer / samordningsnummer.
 //!
 //! Nothing here runs unless [`PiiSection`](crate::config::PiiSection) enables a
-//! rule. Person names are out of scope: they need a model, not a regex.
+//! rule. Person names are not detected here; list them under `[redact.names]`
+//! `people`.
 //!
 //! Lookalikes are rejected by shape:
 //! - an identity number must be a possible calendar day (day 61–91 is a

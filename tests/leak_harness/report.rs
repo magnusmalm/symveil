@@ -171,12 +171,12 @@ impl Run {
         let _ = writeln!(out, "- Git SHA: `{}`", self.sha);
         let _ = writeln!(
             out,
-            "- Name maskers: `[redact.names]` in the free core (terms Exempla, Tundrahorn, TDH; patterns TDH-\\d+ and FAN-[A-Z]+-\\d+). The identifier index `identifiers` is {}.",
+            "- Name maskers: `[redact.names]` in the free core (terms Exempla, Tundrahorn, TDH; people Ren Testdotter; patterns TDH-\\d+ and FAN-[A-Z]+-\\d+). The identifier index `identifiers` is {}.",
             if self.identifiers { "on" } else { "off" }
         );
         let _ = writeln!(
             out,
-            "- Evaluated config: `mode = enforce`, `high_entropy = false`, internal domains `corp`, `internal`, `lan`, personal data email/phone/personnummer on, custom rule `tdh-factory-token`, `[redact.names]` terms Exempla, Tundrahorn, TDH."
+            "- Evaluated config: `mode = enforce`, `high_entropy = false`, internal domains `corp`, `internal`, `lan`, personal data email/phone/personnummer on, custom rule `tdh-factory-token`, `[redact.names]` terms Exempla, Tundrahorn, TDH, people Ren Testdotter."
         );
         let _ = writeln!(out);
         let _ = writeln!(out, "## What this build claims");
@@ -317,7 +317,7 @@ const NOT_COVERED: &[&str] = &[
     "Server-side tools (web search, code interpreter) run at the provider when a real API is used.",
     "Authorization and x-api-key headers are forwarded on purpose. This is not a TLS intercept.",
     "PNG, PDF, and ZIP metadata are tested only as bytes an agent would inline, not by a format parser.",
-    "Person names are not masked. Usernames are not masked. A path is masked only where a configured term appears; that is the name rule, not a path rule.",
+    "Usernames are not masked. A configured person is masked as First Last, as Last, First, and as a single token on a word boundary. A path is masked only where a configured term or person token appears; that is the name rule, not a path rule.",
     "The harness split \"AKIASVCNSPLIT\" \"KEY001\" concatenates to AKIA plus 15 characters, which is not an access key. A two-literal split that forms a real token is masked. Escapes and three-part splits are not reassembled. A password glued to -p with no digit, and a spaced -p argument, are not masked.",
     "Real Claude Code, Grok Build, Codex, and Cursor sessions were not run.",
 ];
@@ -326,7 +326,7 @@ fn claimed() -> Vec<&'static str> {
     vec![
         "Builtin secret rules, including gitlab-pat, azure-account-key, slack-token through 256 characters, sk-admin and sk-svcacct, repr-env-assignment, shell-password, split-string-literal, and base64-secret. JSON object keys, JSON numbers, and a labeled password value are scanned.",
         "Custom [[redact.secrets]] rules. This run adds tdh-factory-token.",
-        "[redact.names] terms Exempla, Tundrahorn, and TDH, plus project-code patterns TDH-\\d+ and FAN-[A-Z]+-\\d+.",
+        "[redact.names] terms Exempla, Tundrahorn, and TDH, people Ren Testdotter, plus project-code patterns TDH-\\d+ and FAN-[A-Z]+-\\d+.",
         "IPv4 and IPv6, except the documented keeps (127.0.0.1, 0.0.0.0, 255.255.255.255, ::, ::1).",
         "Hostnames under internal domains corp, internal, and lan, including a label that contains an underscore.",
         "Email, phone, and Swedish personnummer, because this run opts in. They are not covered when the flags are off.",

@@ -1141,10 +1141,10 @@
     {
       "id": "person-ren",
       "category": "name.person",
-      "expect": "visible",
+      "expect": "masked",
       "family": "person-name",
       "value": "Ren Testdotter",
-      "rule": null,
+      "rule": "person-name",
       "carrier": "Ren Testdotter",
       "locations": [
         "docs/git-log.txt",

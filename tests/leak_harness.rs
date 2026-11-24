@@ -351,7 +351,7 @@ fn verdict(gated_clear: bool, names_reached: bool, streak: u32) -> (String, Vec<
 
 fn recommendation(base64_leaked: bool, names_reached: bool) -> String {
     let mut text = String::from(
-        "NOT SAFE to point SymVeil at a real proprietary codebase until this config has three consecutive clean runs and a real-client pass on Magnus's host. [redact.names] covers the configured company, product, and project names. Person names, usernames, and whole paths are still not a rule.",
+        "NOT SAFE to point SymVeil at a real proprietary codebase until this config has three consecutive clean runs and a real-client pass on Magnus's host. [redact.names] covers the configured company, product, project, and person names. Usernames and whole paths are still not a rule.",
     );
     if names_reached {
         text.push_str(" The planted names reached the mock.");
@@ -499,10 +499,7 @@ fn findings_of(seed: &Seed, items: &[ItemRow], isolated: &BTreeMap<String, bool>
                 fix: "redact_bytes scans JSON string values and skips the key that sits beside them. Scan the raw text, or keep the assignment in view. This is not a proxy-channel leak by itself.".to_string(),
             });
         }
-        let interesting = matches!(
-            item.family.as_str(),
-            "gap" | "exception" | "person-name" | "path"
-        );
+        let interesting = matches!(item.family.as_str(), "gap" | "exception" | "path");
         if interesting && row.upstream_present {
             out.push(Finding {
                 id: item.id.clone(),
@@ -1403,6 +1400,7 @@ fn evaluated_names() -> NamesSection {
                 category: None,
             },
         ],
+        people: vec!["Ren Testdotter".into()],
     }
 }
 
@@ -1436,7 +1434,7 @@ fn config_text(
         out.push_str("\"\n");
     }
     out.push_str(
-        "\n[redact.names]\nterms = [\"Exempla\", \"Tundrahorn\", \"TDH\"]\n\n[[redact.names.patterns]]\nname = \"tdh-code\"\nregex = 'TDH-\\d+'\n\n[[redact.names.patterns]]\nname = \"fan-code\"\nregex = 'FAN-[A-Z]+-\\d+'\n",
+        "\n[redact.names]\nterms = [\"Exempla\", \"Tundrahorn\", \"TDH\"]\npeople = [\"Ren Testdotter\"]\n\n[[redact.names.patterns]]\nname = \"tdh-code\"\nregex = 'TDH-\\d+'\n\n[[redact.names.patterns]]\nname = \"fan-code\"\nregex = 'FAN-[A-Z]+-\\d+'\n",
     );
     out
 }
