@@ -143,6 +143,18 @@ impl Engine {
     }
 
     fn redact_value(&mut self, value: &mut Value, hits: &mut Vec<Hit>) -> Result<()> {
+        let number_text = match &*value {
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        };
+        if let Some(text) = number_text {
+            let (redacted, found) = self.redact_str(&text)?;
+            if redacted != text {
+                hits.extend(found);
+                *value = Value::String(redacted);
+            }
+            return Ok(());
+        }
         match value {
             Value::String(text) => {
                 let (redacted, found) = self.redact_str(text)?;
@@ -155,13 +167,57 @@ impl Engine {
                 }
             }
             Value::Object(map) => {
-                for child in map.values_mut() {
-                    self.redact_value(child, hits)?;
-                }
+                self.redact_object(map, hits)?;
             }
             Value::Null | Value::Bool(_) | Value::Number(_) => {}
         }
         Ok(())
+    }
+
+    /// Object keys are scanned, and a string value is also tried in its key's
+    /// assignment context so `"password": "…"` matches the same rule as text.
+    fn redact_object(
+        &mut self,
+        map: &mut serde_json::Map<String, Value>,
+        hits: &mut Vec<Hit>,
+    ) -> Result<()> {
+        let keys: Vec<String> = map.keys().cloned().collect();
+        let mut rebuilt = Vec::with_capacity(keys.len());
+        for key in keys {
+            let mut child = map.remove(&key).expect("key present");
+            let (redacted_key, key_hits) = self.redact_str(&key)?;
+            hits.extend(key_hits);
+            if let Value::String(text) = &child {
+                if let Some(hit) = self.labeled_value_hit(&key, text)? {
+                    let placeholder = hit.placeholder.clone();
+                    hits.push(hit);
+                    child = Value::String(placeholder);
+                } else {
+                    self.redact_value(&mut child, hits)?;
+                }
+            } else {
+                self.redact_value(&mut child, hits)?;
+            }
+            rebuilt.push((redacted_key, child));
+        }
+        map.clear();
+        for (key, child) in rebuilt {
+            map.insert(key, child);
+        }
+        Ok(())
+    }
+
+    /// When the isolated value is not itself a token, rebuild `"key": "value"`
+    /// and keep a redaction only if that probe masks the value and nothing else.
+    fn labeled_value_hit(&mut self, key: &str, value: &str) -> Result<Option<Hit>> {
+        if key.contains('"') || key.contains('\n') || value.contains('"') || value.contains('\n') {
+            return Ok(None);
+        }
+        let probe = format!("\"{key}\": \"{value}\"");
+        let (_redacted, hits) = self.redact_str(&probe)?;
+        Ok(hits
+            .into_iter()
+            .find(|hit| hit.action == Action::Redact && hit.original == value))
     }
 
     fn consider(
@@ -261,11 +317,42 @@ impl Engine {
                 }
             }
             Value::Object(map) => {
-                for child in map.values() {
+                for (key, child) in map {
+                    for span in self.plan(key) {
+                        if span.action == Action::Block {
+                            hits.push(hit_from_span(key, &span));
+                        }
+                    }
+                    if let Value::String(text) = child {
+                        if !key.contains('"')
+                            && !key.contains('\n')
+                            && !text.contains('"')
+                            && !text.contains('\n')
+                        {
+                            let probe = format!("\"{key}\": \"{text}\"");
+                            for span in self.plan(&probe) {
+                                if span.action != Action::Block {
+                                    continue;
+                                }
+                                let hit = hit_from_span(&probe, &span);
+                                if hit.original == *text {
+                                    hits.push(hit);
+                                }
+                            }
+                        }
+                    }
                     self.collect_blocks(child, hits);
                 }
             }
-            Value::Null | Value::Bool(_) | Value::Number(_) => {}
+            Value::Number(number) => {
+                let text = number.to_string();
+                for span in self.plan(&text) {
+                    if span.action == Action::Block {
+                        hits.push(hit_from_span(&text, &span));
+                    }
+                }
+            }
+            Value::Null | Value::Bool(_) => {}
         }
     }
 
@@ -431,7 +518,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::config::{Action, Config, Mode, RedactSection, SecretRule, UserPattern};
+    use crate::config::{Action, Config, Mode, PiiSection, RedactSection, SecretRule, UserPattern};
 
     fn engine(redact: RedactSection) -> Engine {
         Engine::new(Vault::ephemeral(), &redact).unwrap()
@@ -524,26 +611,65 @@ mod tests {
     }
 
     #[test]
-    fn json_values_are_redacted_and_keys_are_not() {
+    fn json_values_secret_keys_and_labeled_passwords_are_redacted() {
         let mut engine = engine(RedactSection {
             internal_domains: Vec::new(),
             ..RedactSection::default()
         });
-        let input = br#"{"role":"user","content":"key AKIAIOSFODNN7EXAMPLE"}"#;
+        let input = br#"{"role":"user","content":"key AKIAIOSFODNN7EXAMPLE","AKIAIOSFODNN7EXAMPLE":"kept","password":"svcn-json-password-0001","token":"changeme","note":"plain text stays"}"#;
         let (out, hits) = engine.redact_bytes(input).unwrap();
+        let text = String::from_utf8(out.clone()).unwrap();
+        assert!(!text.contains("AKIAIOSFODNN7EXAMPLE"), "{text}");
+        assert!(!text.contains("svcn-json-password-0001"), "{text}");
         let value: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(value.get("role").and_then(Value::as_str), Some("user"));
-        assert_eq!(value.get("content").map(|v| v.is_string()), Some(true));
         let redacted_content = value.get("content").and_then(Value::as_str).unwrap();
         assert!(!redacted_content.contains("AKIA"));
-        assert!(value.get("content").is_some());
-        assert!(!hits.is_empty());
-        let (restored, _) = engine.restore_bytes(&out, true);
-        let restored_value: Value = serde_json::from_slice(&restored).unwrap();
+        assert_eq!(value.get("token").and_then(Value::as_str), Some("changeme"));
         assert_eq!(
-            restored_value.get("content").and_then(Value::as_str),
-            Some("key AKIAIOSFODNN7EXAMPLE")
+            value.get("note").and_then(Value::as_str),
+            Some("plain text stays")
         );
+        assert!(value.get("AKIAIOSFODNN7EXAMPLE").is_none());
+        assert!(hits
+            .iter()
+            .any(|hit| hit.original == "svcn-json-password-0001"));
+        let (restored, _) = engine.restore_bytes(&out, true);
+        let restored_text = String::from_utf8(restored).unwrap();
+        assert!(
+            restored_text.contains("AKIAIOSFODNN7EXAMPLE"),
+            "{restored_text}"
+        );
+        assert!(
+            restored_text.contains("svcn-json-password-0001"),
+            "{restored_text}"
+        );
+        assert!(
+            restored_text.contains("key AKIAIOSFODNN7EXAMPLE"),
+            "{restored_text}"
+        );
+    }
+
+    #[test]
+    fn json_number_text_is_scanned() {
+        let mut engine = engine(RedactSection {
+            internal_domains: Vec::new(),
+            pii: PiiSection {
+                personnummer: true,
+                ..PiiSection::default()
+            },
+            ..RedactSection::default()
+        });
+        let input = br#"{"personnummer":209903154475,"count":3}"#;
+        let (out, hits) = engine.redact_bytes(input).unwrap();
+        let text = String::from_utf8(out.clone()).unwrap();
+        assert!(!text.contains("209903154475"), "{text}");
+        let value: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(value.get("count").and_then(Value::as_u64), Some(3));
+        assert!(value.get("personnummer").and_then(Value::as_str).is_some());
+        assert!(hits.iter().any(|hit| hit.original == "209903154475"));
+        let placeholder = value.get("personnummer").and_then(Value::as_str).unwrap();
+        assert_eq!(engine.restore_str(placeholder), "209903154475");
     }
 
     #[test]
