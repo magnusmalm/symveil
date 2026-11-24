@@ -25,6 +25,7 @@ Builtin rules, always on:
 - OpenAI keys: `sk-` plus 48 alphanumeric characters, and `sk-proj-` keys
 - Anthropic keys that start with `sk-ant-`
 - JWTs with three base64url segments, with or without `=` padding, and a header starting with `eyJ`
+- Standard and URL-safe base64 (16 characters or longer, padding optional) when the decoded text contains a builtin secret. Decoding stops after two layers and 64 KiB. A base64 blob of at least 32 characters is also masked when its plaintext is a single credential-like word, so an opaque secret that is not itself a token shape does not have to be sent through. `high_entropy` stays off and still does not mask a raw token that does not decode to text.
 - The password in a URL with userinfo (`scheme://user:password@host`), including a password that contains `:`. The user and host stay.
 
 Assignment and URL-password values shorter than 8 characters, all-numeric assignment values, and whole-value placeholders such as `changeme`, `password`, and `${VAR}` are left in place. A longer secret that merely contains one of those words is masked. `TOKEN_LIMIT=4096` is not treated as a secret name. A secret-shaped name mentioned mid-line is not an assignment. `sk-admin-` and `sk-svcacct-` keys are not covered.

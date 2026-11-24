@@ -1,6 +1,8 @@
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+use base64::Engine;
 use regex::{Captures, Regex};
 
 use crate::category::Category;
@@ -129,7 +131,9 @@ const BUILTINS: &[Builtin] = &[
 ];
 
 pub fn builtin_rule_names() -> Vec<&'static str> {
-    BUILTINS.iter().map(|builtin| builtin.name).collect()
+    let mut names: Vec<&str> = BUILTINS.iter().map(|builtin| builtin.name).collect();
+    names.push("base64-secret");
+    names
 }
 
 #[derive(Debug)]
@@ -301,8 +305,19 @@ const HIGH_ENTROPY_MIN: usize = 32;
 const HIGH_ENTROPY_MAX: usize = 4_096;
 const HIGH_ENTROPY_BITS: f64 = 4.5;
 
+/// Shortest base64 blob worth decoding. An AWS key encodes to 28 characters,
+/// so this stays under that.
+const BASE64_MIN_LEN: usize = 16;
+const BASE64_MAX_LEN: usize = 8 * 1024;
+/// `base64(base64(secret))` is decoded twice. A third layer is left alone.
+const BASE64_MAX_DEPTH: usize = 2;
+const BASE64_BUDGET: usize = 64 * 1024;
+
 static HIGH_ENTROPY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/_=-]{32,4096}").expect("high entropy token"));
+
+static BASE64_CANDIDATE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/_-]{16,}={0,2}").expect("base64 candidate"));
 
 fn high_entropy_hits(text: &str) -> Vec<SecretHit> {
     let mut hits = Vec::new();
@@ -353,6 +368,90 @@ fn is_uuid(token: &str) -> bool {
         && hex_at(14..18)
         && hex_at(19..23)
         && hex_at(24..36)
+}
+
+fn decode_base64_span(token: &str) -> Option<Vec<u8>> {
+    if token.len() < BASE64_MIN_LEN || token.len() > BASE64_MAX_LEN {
+        return None;
+    }
+    for engine in [STANDARD, URL_SAFE, STANDARD_NO_PAD, URL_SAFE_NO_PAD] {
+        if let Ok(bytes) = engine.decode(token) {
+            if !bytes.is_empty() {
+                return Some(bytes);
+            }
+        }
+    }
+    None
+}
+
+/// A decoded blob hides a secret when a builtin rule matches it, or when a
+/// further base64 layer (bounded by depth and byte budget) does.
+fn decoded_hides_secret(
+    rules: &SecretSet,
+    decoded: &[u8],
+    depth: usize,
+    budget: &mut usize,
+) -> bool {
+    let Ok(text) = std::str::from_utf8(decoded) else {
+        return false;
+    };
+    if !rules.find(text).is_empty() {
+        return true;
+    }
+    if depth >= BASE64_MAX_DEPTH {
+        return false;
+    }
+    for matched in BASE64_CANDIDATE.find_iter(text) {
+        let token = matched.as_str();
+        if token.len() > BASE64_MAX_LEN {
+            continue;
+        }
+        let Some(inner) = decode_base64_span(token) else {
+            continue;
+        };
+        if *budget < inner.len() {
+            return false;
+        }
+        *budget -= inner.len();
+        if decoded_hides_secret(rules, &inner, depth + 1, budget) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Opaque canaries such as `SVCN-base64-plaintext-secret-0001` are not a
+/// builtin shape. Mask the encoding when it is a long high-entropy base64
+/// blob whose plaintext is one credential-like word (no spaces, not a hex
+/// digest). `high_entropy` itself stays off, so a raw token that does not
+/// decode to text is unchanged.
+fn opaque_base64_secret(token: &str, decoded: &[u8]) -> bool {
+    if token.len() < HIGH_ENTROPY_MIN
+        || is_hex_token(token)
+        || is_digest_token(token)
+        || is_uuid(token)
+    {
+        return false;
+    }
+    if shannon_entropy(token) < HIGH_ENTROPY_BITS {
+        return false;
+    }
+    let Ok(text) = std::str::from_utf8(decoded) else {
+        return false;
+    };
+    if text.chars().count() < 16 || text.chars().any(char::is_whitespace) {
+        return false;
+    }
+    if !text
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return false;
+    }
+    if text.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return false;
+    }
+    text.chars().any(|ch| ch.is_ascii_alphabetic()) && text.chars().any(|ch| ch.is_ascii_digit())
 }
 
 fn shannon_entropy(token: &str) -> f64 {
@@ -438,6 +537,33 @@ impl Masker for SecretMasker {
                 end: hit.end,
                 category: Category::Secret,
                 rule: Some(hit.rule),
+                priority: PRI_SECRET,
+                boundary: Boundary::None,
+            });
+        }
+        let mut budget = BASE64_BUDGET;
+        for matched in BASE64_CANDIDATE.find_iter(text) {
+            let token = matched.as_str();
+            if token.len() > BASE64_MAX_LEN {
+                continue;
+            }
+            let Some(decoded) = decode_base64_span(token) else {
+                continue;
+            };
+            if budget < decoded.len() {
+                break;
+            }
+            budget -= decoded.len();
+            if !decoded_hides_secret(&self.rules, &decoded, 1, &mut budget)
+                && !opaque_base64_secret(token, &decoded)
+            {
+                continue;
+            }
+            out.push(Candidate {
+                start: matched.start(),
+                end: matched.end(),
+                category: Category::Secret,
+                rule: Some("base64-secret".to_string()),
                 priority: PRI_SECRET,
                 boundary: Boundary::None,
             });
@@ -845,5 +971,34 @@ let request_id = "123e4567-e89b-12d3-a456-426614174000";
         assert!(!out.contains("Ab3xK9mQ2pL7vN4sT8wY1zC6dE0fGh"), "{out}");
         assert!(out.contains("DATABASE_PASSWORD="), "{out}");
         assert_eq!(enabled.restore_str(&out), mixed);
+    }
+
+    #[test]
+    fn base64_decode_and_rescan_masks_encoded_secrets_without_high_entropy() {
+        let aws = "QUtJQVNWQ05FTkNPREVES0VZMDE=";
+        let short = "U1ZDTi1iYXNlNjQtcGxhaW50ZXh0LXNlY3JldC0wMDAx";
+        let long = "U1ZDTi1sb25nLWJhc2U2NC1zZWNyZXQtUTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4UTdtWnhRN21aeFE3bVp4";
+        let url_safe = "QUtJQUlPU0ZPRE5ON0VYQU1QTEV-";
+        let nested = "UVV0SlFVbFBVMFpQUkU1T04wVllRVTFRVEVVPQ==";
+        for token in [aws, short, long, url_safe, nested] {
+            let (out, rules) = masked(token);
+            assert!(!out.contains(token), "{token} -> {out}");
+            assert_eq!(rules, vec!["base64-secret".to_string()], "{token}");
+        }
+
+        let raw = "qW7zL2nR9xT4mK8pY1cF6vB3hJ5sD0aG";
+        let (kept, rules) = masked(raw);
+        assert!(rules.is_empty(), "{kept}");
+        assert_eq!(kept, raw);
+
+        let sentence = "dGhlIHF1aWNrIGJyb3duIGZveCBqdW1wcyBvdmVyIHRoZSBsYXp5IGRvZw==";
+        let (kept, rules) = masked(sentence);
+        assert!(rules.is_empty(), "{kept}");
+        assert_eq!(kept, sentence);
+
+        let hyphenated = "aGVsbG8td29ybGQtdGhpcy1pcy1ub3QtYS1zZWNyZXQ=";
+        let (kept, rules) = masked(hyphenated);
+        assert!(rules.is_empty(), "{kept}");
+        assert_eq!(kept, hyphenated);
     }
 }
