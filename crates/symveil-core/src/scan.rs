@@ -101,7 +101,7 @@ pub fn hostname_regex(domains: &[String]) -> Result<Option<Regex>> {
         return Ok(None);
     }
     let pattern = format!(
-        r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{{0,61}}[a-z0-9])?\.)+(?:{})\b",
+        r"(?i)\b(?:[a-z0-9_](?:[a-z0-9_-]{{0,61}}[a-z0-9_])?\.)+(?:{})\b",
         suffixes.join("|")
     );
     let regex = Regex::new(&pattern).context("compile internal hostname regex")?;
@@ -187,7 +187,7 @@ fn edge_is(text: &str, at: usize, before: bool, bad: impl Fn(char) -> bool) -> b
 
 #[cfg(test)]
 mod tests {
-    use super::{ipv4_hits, ipv6_hits};
+    use super::{hostname_hits, hostname_regex, ipv4_hits, ipv6_hits};
 
     fn spans(text: &str) -> Vec<&str> {
         ipv4_hits(text)
@@ -218,6 +218,21 @@ mod tests {
         assert_eq!(ipv6_spans("see 2001:db8::1."), vec!["2001:db8::1"]);
         assert_eq!(ipv6_spans("ping fe80::1 now"), vec!["fe80::1"]);
         assert!(ipv6_spans("keep ::1").is_empty());
+    }
+
+    #[test]
+    fn underscore_labels_are_internal_hosts() {
+        let regex = hostname_regex(&["internal".into()]).unwrap().unwrap();
+        let text =
+            "db_backup.fan_line.internal and wiki.exempla.internal and std::env and example.com";
+        let matched: Vec<&str> = hostname_hits(text, &regex)
+            .iter()
+            .map(|hit| &text[hit.start..hit.end])
+            .collect();
+        assert_eq!(
+            matched,
+            vec!["db_backup.fan_line.internal", "wiki.exempla.internal"]
+        );
     }
 
     #[test]
