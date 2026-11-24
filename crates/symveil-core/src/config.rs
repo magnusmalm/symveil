@@ -219,6 +219,21 @@ pub struct SecretRule {
     pub action: Option<Action>,
 }
 
+/// Opt-in personal-data rules. Every flag defaults to off.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PiiSection {
+    pub email: bool,
+    pub phone: bool,
+    pub personnummer: bool,
+}
+
+impl PiiSection {
+    pub fn enabled(&self) -> bool {
+        self.email || self.phone || self.personnummer
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct RedactSection {
@@ -245,6 +260,8 @@ pub struct RedactSection {
     /// mixed base64 blobs that are not credentials still match.
     #[serde(default)]
     pub high_entropy: bool,
+    #[serde(default)]
+    pub pii: PiiSection,
 }
 
 impl Default for RedactSection {
@@ -259,6 +276,7 @@ impl Default for RedactSection {
             patterns: Vec::new(),
             secrets: Vec::new(),
             high_entropy: false,
+            pii: PiiSection::default(),
         }
     }
 }
@@ -384,6 +402,31 @@ mod tests {
         assert!(cfg.redact.secrets.is_empty());
         assert!(cfg.redact.builtin_actions.is_empty());
         assert!(!cfg.redact.high_entropy);
+        assert!(!cfg.redact.pii.enabled());
+    }
+
+    #[test]
+    fn pii_section_is_off_unless_a_flag_is_set() {
+        let cfg = Config::default();
+        assert!(!cfg.redact.pii.email);
+        assert!(!cfg.redact.pii.phone);
+        assert!(!cfg.redact.pii.personnummer);
+
+        let cfg: Config = toml::from_str("[redact]\n").unwrap();
+        assert!(!cfg.redact.pii.enabled());
+
+        let cfg: Config =
+            toml::from_str("[redact.pii]\nemail = true\npersonnummer = true\n").unwrap();
+        assert!(cfg.redact.pii.email);
+        assert!(!cfg.redact.pii.phone);
+        assert!(cfg.redact.pii.personnummer);
+
+        let err = toml::from_str::<Config>("[redact.pii]\nnames = true\n").unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("names"),
+            "unknown pii field should be named in the error: {message}"
+        );
     }
 
     #[test]

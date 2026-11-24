@@ -8,8 +8,8 @@ If you find a way for a secret to reach the upstream model, or for the proxy to 
 
 ## What stays local
 
-- `.symveil/vault.json` holds original secrets and their placeholders.
-- `.symveil/audit.jsonl` records category, rule, length, and placeholder. It omits the secret text.
+- `.symveil/vault.json` holds original secrets and their placeholders. With `[redact.pii]` enabled it also holds those personal-data values, because the reply has to be restored.
+- `.symveil/audit.jsonl` records category, rule, length, and placeholder. It omits secret text and personal-data text.
 - `Authorization`, `x-api-key`, and other client headers are forwarded upstream and are not written to the audit log.
 
 ## Expectations

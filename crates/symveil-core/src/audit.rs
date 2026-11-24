@@ -31,15 +31,16 @@ pub struct AuditReplacement {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule: Option<String>,
     pub len: usize,
-    /// Present for identifiers, addresses, and hostnames. Omitted for secrets so the
-    /// log is not a second copy of them.
+    /// Present for identifiers, addresses, and hostnames. Omitted for secrets and
+    /// personal data so the log is not a second copy of them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original: Option<String>,
 }
 
 pub fn replacement_from_hit(hit: &Hit) -> AuditReplacement {
     let original = match hit.category {
-        Category::Secret => None,
+        // Secrets and personal data stay out of the log. The vault still has them.
+        Category::Secret | Category::Pii => None,
         Category::Function
         | Category::Type
         | Category::Macro
@@ -195,6 +196,25 @@ mod tests {
         assert!(secret_json.contains("@@sv:0123abcd@@"));
         let ident_json = serde_json::to_string(&replacement_from_hit(&ident)).unwrap();
         assert!(ident_json.contains("aurora_rcc_enable_pll"));
+    }
+
+    #[test]
+    fn pii_original_is_omitted() {
+        let hit = Hit {
+            original: "ada@example.com".to_string(),
+            placeholder: "@@sv:0123abcd@@".to_string(),
+            category: Category::Pii,
+            rule: Some("email".to_string()),
+            action: Action::Redact,
+        };
+        let value = serde_json::to_value(replacement_from_hit(&hit)).unwrap();
+        assert_eq!(value["category"], "pii");
+        assert_eq!(value["rule"], "email");
+        assert_eq!(value["len"], 15);
+        assert!(value.get("original").is_none());
+        let json = value.to_string();
+        assert!(!json.contains("ada@example.com"));
+        assert!(json.contains("@@sv:0123abcd@@"));
     }
 
     #[test]
