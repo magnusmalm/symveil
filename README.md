@@ -6,7 +6,7 @@ Local redaction proxy so cloud coding agents never see your secrets.
 
 SymVeil is a local proxy that sits between a coding agent and a cloud model. This tree is the free tier: it masks secrets before a request leaves the machine and restores them in the response, including streamed server-sent events.
 
-The vault and the audit log stay on the machine. Upstream sees placeholders of the form `@@sv:0123abcd@@` instead of the secret.
+The vault and the audit log stay on the machine. The vault file is encrypted; the key sits next to it. Upstream sees placeholders of the form `@@sv:0123abcd@@` instead of the secret.
 
 The free tier masks secrets. Pro identifier and code-name masking is at [symveil.dev](https://symveil.dev).
 
@@ -218,7 +218,7 @@ The official OpenAI and Anthropic Python SDKs, and the Anthropic TypeScript SDK,
 
 Personal data stays off until `[redact.pii]` sets `email`, `phone`, or `personnummer`. See [Optional personal data](#optional-personal-data).
 
-`.symveil/` is gitignored. The vault is the reverse map, including secrets. Do not copy it off the machine. The audit log does not contain secret values or personal-data values.
+`.symveil/` is gitignored. The vault is the reverse map, including secrets and, when those rules are on, personal-data values. SymVeil encrypts it with AES-256-GCM. The key is stored in the OS keychain (macOS Keychain, Linux Secret Service, or Windows Credential Manager), under the service name `symveil` and an account named from a random id in the vault header, so moving the file does not lose the key. A vault whose account was still a hash of the path is migrated the next time it is opened at that path. An existing `.symveil/vault.key` is moved into that keychain on open and then removed. When no keychain can be opened, SymVeil falls back to `.symveil/vault.key` (mode `0600`; the directory is `0700` when SymVeil creates it) and prints a warning that a copy of the directory can decrypt the vault. A locked keychain is not that fallback: startup fails and leaves the vault unchanged. The audit log does not contain secret values or personal-data values. It is mode `0600` and is not encrypted. Encryption does not hide the vault from a process running as the same user, or from root. Do not copy `.symveil/` off the machine. Details: [docs/design/vault-at-rest.md](docs/design/vault-at-rest.md).
 
 ## Development
 
