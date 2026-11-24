@@ -905,10 +905,10 @@
     {
       "id": "host-underscore",
       "category": "hostname.underscore",
-      "expect": "visible",
+      "expect": "masked",
       "family": "gap",
       "value": "db_backup.fan_line.internal",
-      "rule": null,
+      "rule": "internal-hostname",
       "carrier": "db_backup.fan_line.internal",
       "locations": [
         "firmware/tundrahorn_fan.c"
@@ -920,10 +920,10 @@
     {
       "id": "gitlab-bare",
       "category": "secret.gitlab-pat",
-      "expect": "visible",
+      "expect": "masked",
       "family": "gap",
       "value": "glpat-SVCNGITLABTOKEN0001",
-      "rule": null,
+      "rule": "gitlab-pat",
       "carrier": "glpat-SVCNGITLABTOKEN0001",
       "locations": [
         "firmware/tundrahorn_fan.c"
@@ -935,11 +935,11 @@
     {
       "id": "azure-bare",
       "category": "secret.azure-account-key",
-      "expect": "visible",
+      "expect": "masked",
       "family": "gap",
       "value": "svcn-azure-bare-0001",
-      "rule": null,
-      "carrier": "svcn-azure-bare-0001",
+      "rule": "azure-account-key",
+      "carrier": "AccountKey=svcn-azure-bare-0001",
       "locations": [
         "firmware/tundrahorn_fan.c"
       ],
@@ -950,10 +950,10 @@
     {
       "id": "slack-long",
       "category": "secret.slack-overlong",
-      "expect": "visible",
+      "expect": "masked",
       "family": "gap",
       "value": "xoxb-SVCNSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS",
-      "rule": null,
+      "rule": "slack-token",
       "carrier": "xoxb-SVCNSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS",
       "locations": [
         "firmware/tundrahorn_fan.c"
@@ -965,10 +965,10 @@
     {
       "id": "sk-admin",
       "category": "secret.sk-admin",
-      "expect": "visible",
+      "expect": "masked",
       "family": "exception",
       "value": "sk-admin-SVCNadminKey00000000000000000000",
-      "rule": null,
+      "rule": "openai-api-key",
       "carrier": "sk-admin-SVCNadminKey00000000000000000000",
       "locations": [
         "firmware/tundrahorn_fan.c"
@@ -980,10 +980,10 @@
     {
       "id": "company-exempla",
       "category": "name.company",
-      "expect": "visible",
+      "expect": "masked",
       "family": "work-code-name",
       "value": "Exempla",
-      "rule": null,
+      "rule": "name-term",
       "carrier": "Exempla",
       "locations": [
         "firmware/tundrahorn_fan.c",
@@ -991,150 +991,150 @@
         "docs/git-log.txt",
         "dist/bundle.zip"
       ],
-      "severity": null,
+      "severity": "high",
       "repro": null,
       "fix": null
     },
     {
       "id": "company-tundrahorn",
       "category": "name.company",
-      "expect": "visible",
+      "expect": "masked",
       "family": "work-code-name",
       "value": "Tundrahorn",
-      "rule": null,
+      "rule": "name-term",
       "carrier": "Tundrahorn",
       "locations": [
         "firmware/tundrahorn_fan.c",
         "docs/manual.pdf",
         "docs/git-log.txt"
       ],
-      "severity": null,
+      "severity": "high",
       "repro": null,
       "fix": null
     },
     {
       "id": "inflection-exemplas",
       "category": "name.inflection",
-      "expect": "visible",
+      "expect": "masked",
       "family": "work-code-name",
       "value": "Exemplas",
-      "rule": null,
+      "rule": "name-term",
       "carrier": "Exemplas",
       "locations": [
         "firmware/tundrahorn_fan.c",
         "docs/notes.md"
       ],
-      "severity": null,
+      "severity": "high",
       "repro": null,
       "fix": null
     },
     {
       "id": "case-upper",
       "category": "name.case-variant",
-      "expect": "visible",
+      "expect": "masked",
       "family": "work-code-name",
       "value": "EXEMPLA",
-      "rule": null,
+      "rule": "name-term",
       "carrier": "EXEMPLA",
       "locations": [
         "docs/notes.md"
       ],
-      "severity": null,
+      "severity": "high",
       "repro": null,
       "fix": null
     },
     {
       "id": "case-suffix",
       "category": "name.case-variant",
-      "expect": "visible",
+      "expect": "masked",
       "family": "work-code-name",
       "value": "exempla_",
-      "rule": null,
+      "rule": "name-term",
       "carrier": "exempla_",
       "locations": [
         "docs/notes.md"
       ],
-      "severity": null,
+      "severity": "high",
       "repro": null,
       "fix": null
     },
     {
       "id": "case-split",
       "category": "name.case-variant",
-      "expect": "visible",
+      "expect": "masked",
       "family": "work-code-name",
       "value": "Exem-pla",
-      "rule": null,
+      "rule": "name-term",
       "carrier": "Exem-pla",
       "locations": [
         "docs/notes.md"
       ],
-      "severity": null,
+      "severity": "high",
       "repro": null,
       "fix": null
     },
     {
       "id": "code-fn",
       "category": "name.code",
-      "expect": "visible",
+      "expect": "masked",
       "family": "work-code-name",
       "value": "tundrahorn_fan_init",
-      "rule": null,
+      "rule": "name-term",
       "carrier": "tundrahorn_fan_init",
       "locations": [
         "firmware/tundrahorn_fan.c",
         "firmware/tundrahorn_fan.h",
         "services/bridge/main.go"
       ],
-      "severity": null,
+      "severity": "high",
       "repro": null,
       "fix": null
     },
     {
       "id": "code-macro",
       "category": "name.code",
-      "expect": "visible",
+      "expect": "masked",
       "family": "work-code-name",
       "value": "TDH_FAN_MAX",
-      "rule": null,
+      "rule": "name-term",
       "carrier": "TDH_FAN_MAX",
       "locations": [
         "firmware/tundrahorn_fan.c",
         "firmware/tundrahorn_fan.h",
         "firmware/Kconfig"
       ],
-      "severity": null,
+      "severity": "high",
       "repro": null,
       "fix": null
     },
     {
       "id": "product-tdh",
       "category": "name.product-code",
-      "expect": "visible",
+      "expect": "masked",
       "family": "work-code-name",
       "value": "TDH-4471",
-      "rule": null,
+      "rule": "tdh-code",
       "carrier": "TDH-4471",
       "locations": [
         "configs/fan.yaml",
         "docs/git-log.txt"
       ],
-      "severity": null,
+      "severity": "high",
       "repro": null,
       "fix": null
     },
     {
       "id": "product-fan",
       "category": "name.product-code",
-      "expect": "visible",
+      "expect": "masked",
       "family": "work-code-name",
       "value": "FAN-ALPHA-2",
-      "rule": null,
+      "rule": "fan-code",
       "carrier": "FAN-ALPHA-2",
       "locations": [
         "firmware/tundrahorn_fan.h"
       ],
-      "severity": null,
+      "severity": "high",
       "repro": null,
       "fix": null
     },

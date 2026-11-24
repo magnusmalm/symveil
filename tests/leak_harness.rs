@@ -1,6 +1,6 @@
-//! Synthetic leak measurement. The free build's safe-for-work-code verdict is
-//! NOT SAFE: company and code names are not covered. Gated canaries that reach
-//! the mock fail this test. Masking is not changed here.
+//! Synthetic leak measurement with the A–D fixes combined. Configured names are
+//! covered. The verdict stays NOT SAFE until three clean runs and a real-client
+//! pass. Gated canaries that reach the mock fail this test.
 
 #[path = "leak_harness/corpus.rs"]
 mod corpus;
@@ -25,7 +25,7 @@ use proxy::EchoMode;
 use report::{CategoryRow, Check, Finding, ItemRow, Run, SideRow};
 use serde_json::{json, Value};
 use symveil::build_engine;
-use symveil::config::{PiiSection, RedactSection, SecretRule};
+use symveil::config::{NamesSection, PiiSection, RedactSection, SecretRule, UserPattern};
 use symveil::vault::Vault;
 
 const COMMAND_FILES: &[&str] = &[
@@ -70,6 +70,20 @@ fn leak_canary_shapes() {
         let (output, _) = engine
             .redact_str(&item.carrier)
             .unwrap_or_else(|err| panic!("{} redact: {err}", item.id));
+        if item.id == "keep-numeric-env" {
+            assert!(output.contains("12345678"), "{output}");
+            assert!(!output.contains("TDH_API_KEY"), "{output}");
+            continue;
+        }
+        if item.family == "path" {
+            let lower = output.to_lowercase();
+            assert!(!lower.contains("exempla"), "{} {output}", item.id);
+            assert!(!lower.contains("tundrahorn"), "{} {output}", item.id);
+            if item.carrier.contains("jdoe") {
+                assert!(output.contains("jdoe"), "{output}");
+            }
+            continue;
+        }
         assert_eq!(output, item.carrier, "visible carrier changed: {}", item.id);
     }
 }
@@ -82,13 +96,27 @@ async fn leak_measurement() {
     if run.verdict != "NOT SAFE" {
         problems.push("verdict must be NOT SAFE on this free build".to_string());
     }
-    let names = run.reasons.iter().any(|reason| {
-        let text = reason.to_ascii_lowercase();
-        text.contains("name") && text.contains("not covered")
-    });
-    if !names {
+    let streak = run
+        .reasons
+        .iter()
+        .any(|reason| reason.contains("three are required"));
+    let clients = run
+        .reasons
+        .iter()
+        .any(|reason| reason.contains("were not run"));
+    if !streak || !clients {
         problems.push(
-            "verdict reasons must say company, project, and code names are not covered".to_string(),
+            "verdict must stay NOT SAFE until three clean runs and a real-client pass".to_string(),
+        );
+    }
+    if run.reasons.iter().any(|reason| {
+        reason
+            .to_ascii_lowercase()
+            .contains("names are not covered")
+    }) {
+        problems.push(
+            "configured [redact.names] terms are covered; the verdict must not say otherwise"
+                .to_string(),
         );
     }
     if problems.is_empty() {
@@ -247,6 +275,8 @@ fn assemble(
     let restores_ok = restores.iter().all(|check| check.pass);
     let policies_ok = policies.iter().all(|check| check.pass);
     let pii_ok = pii_off.iter().all(|row| !row.masked);
+    // A clean run includes a real-client pass. This harness never runs one.
+    let real_client_pass = false;
     let this_run_clean = gated.is_empty()
         && !names_reached
         && fp_rise.is_empty()
@@ -255,7 +285,8 @@ fn assemble(
         && policies_ok
         && pii_ok
         && idempotent
-        && harness_errors.is_empty();
+        && harness_errors.is_empty()
+        && real_client_pass;
     let streak = if this_run_clean { 1 } else { 0 };
     let (verdict, reasons) = verdict(gated.is_empty(), names_reached, streak);
     let base64_leaked = items.iter().any(|row| {
@@ -289,19 +320,11 @@ fn assemble(
 
 fn verdict(gated_clear: bool, names_reached: bool, streak: u32) -> (String, Vec<String>) {
     let mut reasons = Vec::new();
-    if cfg!(feature = "identifiers") {
-        if names_reached {
-            reasons.push(
-                "Company, project, or code names reached the mock. Safe for work code requires zero of those leaks."
-                    .to_string(),
-            );
-        }
-    } else {
-        let mut reason = "Company, project, and code names are not covered. This is the free build: the identifiers feature is off and this tree has no name maskers. Safe for work code requires those names to be masked.".to_string();
-        if names_reached {
-            reason.push_str(" The planted names reached the mock.");
-        }
-        reasons.push(reason);
+    if names_reached {
+        reasons.push(
+            "Company, project, or code names reached the mock. [redact.names] covers those terms on this build. Safe for work code requires zero of those leaks."
+                .to_string(),
+        );
     }
     if !gated_clear {
         reasons.push(
@@ -328,7 +351,7 @@ fn verdict(gated_clear: bool, names_reached: bool, streak: u32) -> (String, Vec<
 
 fn recommendation(base64_leaked: bool, names_reached: bool) -> String {
     let mut text = String::from(
-        "NOT SAFE to point SymVeil at a real proprietary codebase. This free build does not mask company, project, or code names, and those names are the main risk for real work code.",
+        "NOT SAFE to point SymVeil at a real proprietary codebase until this config has three consecutive clean runs and a real-client pass on Magnus's host. [redact.names] covers the configured company, product, and project names. Person names, usernames, and whole paths are still not a rule.",
     );
     if names_reached {
         text.push_str(" The planted names reached the mock.");
@@ -507,10 +530,10 @@ fn findings_of(seed: &Seed, items: &[ItemRow], isolated: &BTreeMap<String, bool>
                 sessions: name_sessions.into_iter().collect(),
                 locations: name_locations.into_iter().collect(),
                 repro: format!(
-                    "Free build does not mask company, project, or code names. Ids present upstream: {}.",
+                    "Configured name terms reached the mock. Ids present upstream: {}.",
                     name_ids.join(", ")
                 ),
-                fix: "Name masking is not in this tree. The safe-for-work-code verdict stays NOT SAFE until a build that masks these names has three clean runs and a real-client pass.".to_string(),
+                fix: "[redact.names] should have masked these terms. The safe-for-work-code verdict stays NOT SAFE until three clean runs and a real-client pass.".to_string(),
             },
         );
     }
@@ -554,7 +577,12 @@ fn sent_anywhere(item: &Item, sessions: &[Session]) -> bool {
 }
 
 fn missing_where_sent(item: &Item, sessions: &[Session]) -> bool {
-    let needles = scan::presence_needles(&item.value);
+    // TDH is a configured name, so the keep is the numeric value, not the prefix.
+    let needles = if item.id == "keep-numeric-env" {
+        scan::presence_needles("12345678")
+    } else {
+        scan::presence_needles(&item.value)
+    };
     let mut saw = false;
     for session in sessions {
         if !needles.iter().any(|needle| session.sent.contains(needle)) {
@@ -913,11 +941,29 @@ fn pii_off(
             });
             continue;
         }
-        let masked = !text.contains(&item.value);
+        let absent = !text.contains(&item.value);
+        let company_in_address = item.value.to_ascii_lowercase().contains("exempla");
+        let local_kept = item
+            .value
+            .split('@')
+            .next()
+            .is_some_and(|local| !local.is_empty() && text.contains(local));
+        if company_in_address {
+            rows.push(SideRow {
+                id: item.id.clone(),
+                masked: !local_kept,
+                detail: if local_kept {
+                    "email rule is off; the configured term Exempla inside the domain is masked and the local-part stays".to_string()
+                } else {
+                    "local-part disappeared while personal data flags are off".to_string()
+                },
+            });
+            continue;
+        }
         rows.push(SideRow {
             id: item.id.clone(),
-            masked,
-            detail: if masked {
+            masked: absent,
+            detail: if absent {
                 "absent from stdout while personal data flags are off".to_string()
             } else {
                 "still present, as required when the flags are off".to_string()
@@ -1306,7 +1352,11 @@ fn needle_collisions(seed: &Seed) -> Vec<String> {
                 if other.id == item.id {
                     continue;
                 }
-                if other.value.contains(&needle) {
+                if other.expect != Expect::Masked
+                    && other.family != "path"
+                    && other.family != "work-code-name"
+                    && other.value.contains(&needle)
+                {
                     errors.push(format!("{} needle collides with {}", item.id, other.id));
                 }
             }
@@ -1332,8 +1382,27 @@ fn evaluated_redact() -> RedactSection {
             regex: r"\btdh_live_[A-Za-z0-9]{16,}\b".to_string(),
             action: None,
         }],
+        names: evaluated_names(),
         high_entropy: false,
         ..RedactSection::default()
+    }
+}
+
+fn evaluated_names() -> NamesSection {
+    NamesSection {
+        terms: vec!["Exempla".into(), "Tundrahorn".into(), "TDH".into()],
+        patterns: vec![
+            UserPattern {
+                name: "tdh-code".into(),
+                regex: r"TDH-\d+".into(),
+                category: None,
+            },
+            UserPattern {
+                name: "fan-code".into(),
+                regex: r"FAN-[A-Z]+-\d+".into(),
+                category: None,
+            },
+        ],
     }
 }
 
@@ -1366,6 +1435,9 @@ fn config_text(
         out.push_str(action);
         out.push_str("\"\n");
     }
+    out.push_str(
+        "\n[redact.names]\nterms = [\"Exempla\", \"Tundrahorn\", \"TDH\"]\n\n[[redact.names.patterns]]\nname = \"tdh-code\"\nregex = 'TDH-\\d+'\n\n[[redact.names.patterns]]\nname = \"fan-code\"\nregex = 'FAN-[A-Z]+-\\d+'\n",
+    );
     out
 }
 
