@@ -1,5 +1,9 @@
 # Real-client check (Magnus's host only)
 
+`make leak-streak` runs the full leak measurement three times back to back. Each run starts from a clean `target/leak-report`. It prints SAFE only when all three runs have zero gated leaks, and NOT SAFE with the failing run number otherwise.
+
+SAFE for work use also requires the real-client pass: Claude Code and Grok Build on starbase, synthetic repo only, mock upstream first. The streak alone does not satisfy that.
+
 This harness does not run Claude Code or Grok Build. Those checks happen on a machine you control, against the **synthetic** corpus only. Do not point either client at a proprietary tree for this check. SymVeil is not a sandbox: the agent can still read files locally, and anything that does not go through the proxy is not redacted.
 
 Generate the corpus with `make leak-test` (output under `target/leak-report/corpus-a`) or by running the harness's generator. The files are fake: company Exempla, product Tundrahorn. Open that directory as the workspace.
