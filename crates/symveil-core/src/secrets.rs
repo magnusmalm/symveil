@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use regex::{Captures, Regex};
 
 use crate::category::Category;
-use crate::config::UserPattern;
+use crate::config::SecretRule;
 use crate::masker::{Boundary, Candidate, Masker, PRI_PATTERN, PRI_SECRET};
 use crate::vault::Vault;
 
@@ -128,6 +128,10 @@ const BUILTINS: &[Builtin] = &[
     },
 ];
 
+pub fn builtin_rule_names() -> Vec<&'static str> {
+    BUILTINS.iter().map(|builtin| builtin.name).collect()
+}
+
 #[derive(Debug)]
 pub struct SecretHit {
     pub start: usize,
@@ -147,7 +151,7 @@ pub struct SecretSet {
 }
 
 impl SecretSet {
-    pub fn compile(user: &[UserPattern]) -> Result<Self> {
+    pub fn compile(user: &[SecretRule]) -> Result<Self> {
         let mut rules = Vec::with_capacity(BUILTINS.len() + user.len());
         for builtin in BUILTINS {
             let regex = Regex::new(builtin.pattern)
@@ -160,6 +164,13 @@ impl SecretSet {
             });
         }
         for pattern in user {
+            if BUILTINS.iter().any(|builtin| builtin.name == pattern.name) {
+                anyhow::bail!(
+                    "secret rule `{}` reuses the builtin rule name `{}`. Rename it. A custom rule cannot use a builtin detector name; set that detector's action in [redact.builtin].",
+                    pattern.name,
+                    pattern.name
+                );
+            }
             if pattern.regex.is_empty() {
                 anyhow::bail!("secret rule '{}' has an empty regex", pattern.name);
             }
@@ -378,7 +389,7 @@ pub struct SecretMasker {
 }
 
 impl SecretMasker {
-    pub(crate) fn compile(user: &[UserPattern], vault: &Vault, high_entropy: bool) -> Result<Self> {
+    pub(crate) fn compile(user: &[SecretRule], vault: &Vault, high_entropy: bool) -> Result<Self> {
         let mut literals = Vec::new();
         for entry in vault.iter() {
             if entry.original.is_empty() || entry.category != Category::Secret {

@@ -29,7 +29,9 @@ Builtin rules, always on:
 
 Assignment and URL-password values shorter than 8 characters, all-numeric assignment values, and whole-value placeholders such as `changeme`, `password`, and `${VAR}` are left in place. A longer secret that merely contains one of those words is masked. `TOKEN_LIMIT=4096` is not treated as a secret name. A secret-shaped name mentioned mid-line is not an assignment. `sk-admin-` and `sk-svcacct-` keys are not covered.
 
-It also masks IPv4 and IPv6 addresses (keeping `127.0.0.1`, `0.0.0.0`, `255.255.255.255`, and `::1`) and hostnames under the configured internal domains. An address has to stand on its own, so a Rust path such as `std::env` is left alone. Add your own secret rules under `[[redact.secrets]]`.
+It also masks IPv4 and IPv6 addresses (keeping `127.0.0.1`, `0.0.0.0`, `255.255.255.255`, and `::1`) and hostnames under the configured internal domains. An address has to stand on its own, so a Rust path such as `std::env` is left alone. Add your own secret rules under `[[redact.secrets]]`. The name has to be one you choose: a name that matches a builtin detector is rejected at startup.
+
+Each rule has an action. `redact` is the default: the proxy replaces the match and restores it in the response. `warn` forwards the original, writes an audit entry, and logs a warning. `block` returns HTTP 400 and does not call upstream. A config that omits `action` keeps the `redact` behavior.
 
 Set `high_entropy = true` under `[redact]` to also mask tokens of 32 to 4096 characters whose Shannon entropy is at least 4.5 bits per character. It is off by default. Hex strings, UUIDs, and tokens that start with `sha1-`, `sha256-`, `sha384-`, or `sha512-` are skipped. Other long base64 blobs are still masked, which is why the switch stays off.
 
@@ -163,14 +165,37 @@ audit_log = ".symveil/audit.jsonl"
 vault = ".symveil/vault.json"
 
 [redact]
+# enforce (default) honors each action. observe treats every match as warn.
+mode = "enforce"
 internal_domains = ["corp", "internal", "lan"]
+
+# Optional default for a whole category. Omitted categories use redact.
+[redact.category]
+secret = "redact"
+ip = "redact"
+hostname = "redact"
+
+# Optional action for one builtin detector. This overrides [redact.category].
+[redact.builtin]
+private-key = "block"
 
 [[redact.secrets]]
 name = "acme-factory-token"
 regex = '\bacme_live_[A-Za-z0-9]{16,}\b'
+action = "warn"
 ```
 
-`.symveil/` is gitignored. The vault is the reverse map, including secrets. Do not copy it off the machine.
+`action` is `redact`, `warn`, or `block`. Leave it out to redact. An explicit action on a `[[redact.secrets]]` rule applies to that rule. It does not change a builtin detector. Startup fails if a custom rule's name matches a builtin detector name, and the error names the rule and tells you to rename it. Change a builtin's action in `[redact.builtin]`. A `block` match blocks the request even when a wider `warn` or `redact` span covers the same bytes. `mode = "observe"` forces warn for every match, including rules set to block, so a repo can be tried before anything is masked or refused.
+
+Builtin detector names: `aws-access-key-id`, `github-pat`, `github-fine-grained-pat`, `slack-token`, `google-api-key`, `stripe-live-secret`, `openai-api-key`, `anthropic-api-key`, `jwt`, `url-password`, `private-key`, `generic-api-key`, `env-assignment`, `env-quoted-assignment`, `ipv4`, `ipv6`, `internal-hostname`. Category names: `secret`, `ip`, `hostname`. An unknown action, mode, category, or builtin name fails at startup and names the values that are accepted.
+
+`block` responds with HTTP 400 and does not contact upstream. The response sets `x-should-retry: false`. `POST /v1/messages` returns an Anthropic error object: `type` is `error`, `error.type` is `invalid_request_error`, and the same sentence is repeated in the top-level `message` and in `error.message`. Other `/v1/*` routes return an OpenAI error object: `error.type` is `invalid_request_error` and `error.code` is `symveil_blocked`. The sentence names the rule and the length. It does not include the matched secret.
+
+The official OpenAI and Anthropic Python SDKs, and the Anthropic TypeScript SDK, retry 408, 409, 429, and 5xx. They do not retry 400 unless `x-should-retry` is `true`. The OpenAI Node SDK reads `error.message`. The Anthropic TypeScript SDK uses the top-level `message` as the exception text and `error.message` as `apiMessage`. This repository was not run against Claude Code or those SDK processes.
+
+`warn` leaves the match in the upstream body. The proxy logs `forwarded a match unchanged` with the rule, category, and length. The audit line uses `"action":"warn"` and, for a secret, omits both the value and a placeholder. Addresses and hostnames are still stored, as they were for redaction. `redact` still writes the placeholder and restores it on the way back.
+
+`.symveil/` is gitignored. The vault is the reverse map, including secrets. Do not copy it off the machine. The audit log does not contain secret values.
 
 ## Development
 

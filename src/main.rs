@@ -10,8 +10,9 @@ use symveil::audit::AuditLog;
 use symveil::build_engine;
 #[cfg(feature = "identifiers")]
 use symveil::category::Category;
-use symveil::config::{resolve_path, Config};
+use symveil::config::{resolve_path, Action, Config};
 use symveil::proxy::{self, AppState};
+use symveil::redact::{self as policy, Hit};
 use symveil::vault::Vault;
 
 #[cfg(feature = "identifiers")]
@@ -259,6 +260,7 @@ async fn cmd_proxy(args: ProxyArgs) -> Result<()> {
     eprintln!("  masking     secrets and identifiers");
     #[cfg(not(feature = "identifiers"))]
     eprintln!("  masking     secrets");
+    eprintln!("  mode        {}", cfg.redact.mode);
     eprintln!("  vault       {entries} entries ({})", vault_path.display());
     eprintln!("  audit       {}", audit_path.display());
     proxy::serve(listener, state).await
@@ -284,13 +286,23 @@ fn cmd_text(args: TextArgs, redact: bool) -> Result<()> {
             let (text, hits) = engine.redact_str(&raw)?;
             (text.into_bytes(), hits)
         };
+        if policy::contains_block(&hits) {
+            anyhow::bail!("{}", policy::block_message(&hits));
+        }
         engine.save_if_dirty()?;
         io::stdout().write_all(&bytes)?;
-        eprintln!("redactions: {}", hits.len());
+        eprintln!("redactions: {}", policy::redact_count(&hits));
+        warn_forwarded(&hits);
     } else {
         let (bytes, restored) = engine.restore_bytes(raw.as_bytes(), json);
         io::stdout().write_all(&bytes)?;
         eprintln!("restored: {restored}");
     }
     Ok(())
+}
+
+fn warn_forwarded(hits: &[Hit]) {
+    for hit in hits.iter().filter(|hit| hit.action == Action::Warn) {
+        eprintln!("warning: {} forwarded unchanged", policy::match_label(hit));
+    }
 }

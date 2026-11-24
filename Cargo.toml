@@ -31,3 +31,4 @@ bytes = "1"
 futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls", "stream"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tracing = "0.1"
