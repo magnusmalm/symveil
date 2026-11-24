@@ -16,21 +16,25 @@ Builtin rules, always on:
 
 - AWS access key ids
 - GitHub PATs (classic and fine-grained)
-- Slack tokens
+- Slack tokens (`xoxb-`, `xoxa-`, `xoxp-`, `xoxr-`, `xoxs-`) with a body of 10 to 256 characters
 - Google API keys
 - Stripe live secrets
 - PEM private keys
+- GitLab personal access tokens (`glpat-` plus 16 or more characters)
+- Azure `AccountKey=` values
 - Quoted `api_key`, `apikey`, `secret`, `token`, and `password` assignments (the value only), including a JSON object whose key is one of those words. The same walk scans JSON object keys and the decimal text of JSON numbers.
-- `.env` assignments whose names are uppercase and end in `_KEY`, `_SECRET`, `_TOKEN`, `_PASSWORD`, or `_PASS`. A leading `export`, spaces around `=`, single or double quotes, and a trailing `#` comment are recognized. An unquoted value may contain spaces and runs until that comment. Only the value is masked.
-- OpenAI keys: `sk-` plus 48 alphanumeric characters, and `sk-proj-` keys
+- `.env` assignments whose names are uppercase and end in `_KEY`, `_SECRET`, `_TOKEN`, `_PASSWORD`, or `_PASS`. A leading `export`, spaces around `=`, an optional quote before the name (a docker inspect `Env` entry), single or double quotes around the value, and a trailing `#` comment are recognized. An unquoted value may contain spaces and runs until that comment. Only the value is masked. A pytest `environ({...})` or Python dict with the same kind of name is masked the same way.
+- A password glued to `-p` when it contains a digit, and a password after `--password` or `--pass`
+- Two adjacent double-quoted string literals whose concatenation is a builtin secret (both literals are masked). A split that does not form a real token is left as written.
+- OpenAI keys: `sk-` plus 48 alphanumeric characters, and `sk-proj-`, `sk-admin-`, and `sk-svcacct-` keys with a body of at least 32 characters
 - Anthropic keys that start with `sk-ant-`
 - JWTs with three base64url segments, with or without `=` padding, and a header starting with `eyJ`
 - Standard and URL-safe base64 (16 characters or longer, padding optional) when the decoded text contains a builtin secret. Decoding stops after two layers and 64 KiB. A base64 blob of at least 32 characters is also masked when its plaintext is a single credential-like word, so an opaque secret that is not itself a token shape does not have to be sent through. `high_entropy` stays off and still does not mask a raw token that does not decode to text.
 - The password in a URL with userinfo (`scheme://user:password@host`), including a password that contains `:`. The user and host stay.
 
-Assignment and URL-password values shorter than 8 characters, all-numeric assignment values, and whole-value placeholders such as `changeme`, `password`, and `${VAR}` are left in place. A longer secret that merely contains one of those words is masked. `TOKEN_LIMIT=4096` is not treated as a secret name. A secret-shaped name mentioned mid-line is not an assignment. `sk-admin-` and `sk-svcacct-` keys are not covered.
+Assignment and URL-password values shorter than 8 characters, all-numeric assignment values, and whole-value placeholders such as `changeme`, `password`, and `${VAR}` are left in place. A longer secret that merely contains one of those words is masked. `TOKEN_LIMIT=4096` is not treated as a secret name. A secret-shaped name mentioned mid-line is not an assignment. `sk-ant-` stays on the Anthropic rule.
 
-It also masks IPv4 and IPv6 addresses (keeping `127.0.0.1`, `0.0.0.0`, `255.255.255.255`, and `::1`) and hostnames under the configured internal domains. An address has to stand on its own, so a Rust path such as `std::env` is left alone. Add your own secret rules under `[[redact.secrets]]`. The name has to be one you choose: a name that matches a builtin detector is rejected at startup.
+It also masks IPv4 and IPv6 addresses (keeping `127.0.0.1`, `0.0.0.0`, `255.255.255.255`, and `::1`) and hostnames under the configured internal domains, including a label that contains `_`. An address has to stand on its own, so a Rust path such as `std::env` is left alone. Add your own secret rules under `[[redact.secrets]]`. The name has to be one you choose: a name that matches a builtin detector is rejected at startup.
 
 Each rule has an action. `redact` is the default: the proxy replaces the match and restores it in the response. `warn` forwards the original, writes an audit entry, and logs a warning. `block` returns HTTP 400 and does not call upstream. A config that omits `action` keeps the `redact` behavior.
 
@@ -209,7 +213,7 @@ action = "warn"
 
 `action` is `redact`, `warn`, or `block`. Leave it out to redact. An explicit action on a `[[redact.secrets]]` rule applies to that rule. It does not change a builtin detector. Startup fails if a custom rule's name matches a builtin detector name, and the error names the rule and tells you to rename it. Change a builtin's action in `[redact.builtin]`. A `block` match blocks the request even when a wider `warn` or `redact` span covers the same bytes. `mode = "observe"` forces warn for every match, including rules set to block, so a repo can be tried before anything is masked or refused.
 
-Builtin detector names: `aws-access-key-id`, `github-pat`, `github-fine-grained-pat`, `slack-token`, `google-api-key`, `stripe-live-secret`, `openai-api-key`, `anthropic-api-key`, `jwt`, `url-password`, `private-key`, `generic-api-key`, `env-assignment`, `env-quoted-assignment`, `ipv4`, `ipv6`, `internal-hostname`. Category names: `secret`, `ip`, `hostname`. An unknown action, mode, category, or builtin name fails at startup and names the values that are accepted.
+Builtin detector names: `aws-access-key-id`, `github-pat`, `github-fine-grained-pat`, `slack-token`, `google-api-key`, `stripe-live-secret`, `openai-api-key`, `anthropic-api-key`, `jwt`, `url-password`, `private-key`, `generic-api-key`, `env-assignment`, `env-quoted-assignment`, `gitlab-pat`, `azure-account-key`, `repr-env-assignment`, `shell-password`, `split-string-literal`, `base64-secret`, `ipv4`, `ipv6`, `internal-hostname`. Category names: `secret`, `ip`, `hostname`. An unknown action, mode, category, or builtin name fails at startup and names the values that are accepted.
 
 `block` responds with HTTP 400 and does not contact upstream. The response sets `x-should-retry: false`. `POST /v1/messages` returns an Anthropic error object: `type` is `error`, `error.type` is `invalid_request_error`, and the same sentence is repeated in the top-level `message` and in `error.message`. Other `/v1/*` routes return an OpenAI error object: `error.type` is `invalid_request_error` and `error.code` is `symveil_blocked`. The sentence names the rule and the length. It does not include the matched secret.
 

@@ -43,7 +43,7 @@ const BUILTINS: &[Builtin] = &[
     },
     Builtin {
         name: "slack-token",
-        pattern: r"\bxox[baprs]-[0-9A-Za-z-]{10,48}\b",
+        pattern: r"\bxox[baprs]-[0-9A-Za-z-]{10,256}\b",
         groups: &[],
         filter_low_signal: false,
     },
@@ -61,10 +61,10 @@ const BUILTINS: &[Builtin] = &[
     },
     Builtin {
         name: "openai-api-key",
-        // Legacy keys are `sk-` plus 48 alphanumeric characters. Project keys
-        // are `sk-proj-` plus a long base64url body. `sk-ant-` does not fit
-        // either shape. `sk-admin-` and `sk-svcacct-` are not this rule.
-        pattern: r"\bsk-(?:proj-[A-Za-z0-9_-]{32,2000}|[A-Za-z0-9]{48})\b",
+        // Legacy keys are `sk-` plus 48 alphanumeric characters. Project,
+        // admin, and service-account keys share a longer body. `sk-ant-`
+        // does not fit any of these shapes.
+        pattern: r"\bsk-(?:(?:proj|admin|svcacct)-[A-Za-z0-9_-]{32,2000}|[A-Za-z0-9]{48})\b",
         groups: &[],
         filter_low_signal: false,
     },
@@ -110,6 +110,9 @@ const BUILTINS: &[Builtin] = &[
         name: "env-assignment",
         pattern: concat!(
             r"(?m)^[ \t]*(?:export[ \t]+)?",
+            // One quote covers a docker inspect Env entry, which is a JSON
+            // string and therefore has a quote before the name in the raw file.
+            r#"["']?"#,
             r"[A-Z_][A-Z0-9_]*(?:_KEY|_SECRET|_TOKEN|_PASSWORD|_PASS)",
             // Words may contain spaces. A `#` comment and quotes stay outside
             // the value, so a quoted assignment is left to the quoted rule.
@@ -122,9 +125,38 @@ const BUILTINS: &[Builtin] = &[
         name: "env-quoted-assignment",
         pattern: concat!(
             r"(?m)^[ \t]*(?:export[ \t]+)?",
+            r#"["']?"#,
             r"[A-Z_][A-Z0-9_]*(?:_KEY|_SECRET|_TOKEN|_PASSWORD|_PASS)",
             r#"[ \t]*=[ \t]*(?:"([^"\r\n]{8,})"|'([^'\r\n]{8,})')"#
         ),
+        groups: &[1, 2],
+        filter_low_signal: true,
+    },
+    Builtin {
+        name: "gitlab-pat",
+        pattern: r"\bglpat-[A-Za-z0-9_-]{16,}\b",
+        groups: &[],
+        filter_low_signal: false,
+    },
+    Builtin {
+        name: "azure-account-key",
+        pattern: r#"(?i)\bAccountKey=([^\s&;"']{8,})"#,
+        groups: &[1],
+        filter_low_signal: true,
+    },
+    Builtin {
+        name: "repr-env-assignment",
+        // pytest's environ({...}) and a Python dict. The name stays.
+        pattern: r#"['"]([A-Z][A-Z0-9_]*(?:_KEY|_SECRET|_TOKEN|_PASSWORD|_PASS))['"]\s*:\s*(?:'([^'\n]{8,})'|"([^"\n]{8,})")"#,
+        groups: &[2, 3],
+        filter_low_signal: true,
+    },
+    Builtin {
+        name: "shell-password",
+        // A password glued to `-p`, or following `--password` / `--pass`.
+        // The glued form has to contain a digit, so `-parameter` stays a flag.
+        // A spaced `-p file` is left alone: `-p` is also a filename flag.
+        pattern: r#"(?i)(?:--password|--pass)(?:=|\s+)([^\s'"]{8,})|(?:^|[\s;|&])-p([^\s'"]*\d[^\s'"]*)"#,
         groups: &[1, 2],
         filter_low_signal: true,
     },
@@ -133,6 +165,7 @@ const BUILTINS: &[Builtin] = &[
 pub fn builtin_rule_names() -> Vec<&'static str> {
     let mut names: Vec<&str> = BUILTINS.iter().map(|builtin| builtin.name).collect();
     names.push("base64-secret");
+    names.push("split-string-literal");
     names
 }
 
@@ -318,6 +351,9 @@ static HIGH_ENTROPY: LazyLock<Regex> =
 
 static BASE64_CANDIDATE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/_-]{16,}={0,2}").expect("base64 candidate"));
+
+static ADJACENT_STRINGS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#""([^"\\]*)"\s+"([^"\\]*)""#).expect("adjacent string literals"));
 
 fn high_entropy_hits(text: &str) -> Vec<SecretHit> {
     let mut hits = Vec::new();
@@ -505,6 +541,43 @@ impl SecretMasker {
             high_entropy,
         })
     }
+
+    /// `"AKIAIOSFODNN7EXA" "MPLE"` is one access key in C. Mask both literals
+    /// when the concatenation matches a builtin and the match crosses the join.
+    /// Escapes and three-part splits are not reassembled.
+    fn push_joined_string_literals(&self, text: &str, out: &mut Vec<Candidate>) {
+        for caps in ADJACENT_STRINGS.captures_iter(text) {
+            let Some(left) = caps.get(1) else {
+                continue;
+            };
+            let Some(right) = caps.get(2) else {
+                continue;
+            };
+            let joined = format!("{}{}", left.as_str(), right.as_str());
+            let boundary = left.as_str().len();
+            let crosses = self
+                .rules
+                .find(&joined)
+                .into_iter()
+                .any(|hit| hit.start < boundary && hit.end > boundary);
+            if !crosses {
+                continue;
+            }
+            for part in [left, right] {
+                if part.as_str().is_empty() {
+                    continue;
+                }
+                out.push(Candidate {
+                    start: part.start(),
+                    end: part.end(),
+                    category: Category::Secret,
+                    rule: Some("split-string-literal".to_string()),
+                    priority: PRI_SECRET,
+                    boundary: Boundary::None,
+                });
+            }
+        }
+    }
 }
 
 impl Masker for SecretMasker {
@@ -568,6 +641,7 @@ impl Masker for SecretMasker {
                 boundary: Boundary::None,
             });
         }
+        self.push_joined_string_literals(text, &mut out);
         if self.high_entropy {
             let named: Vec<(usize, usize)> = out.iter().map(|hit| (hit.start, hit.end)).collect();
             for hit in high_entropy_hits(text) {
@@ -1000,5 +1074,90 @@ let request_id = "123e4567-e89b-12d3-a456-426614174000";
         let (kept, rules) = masked(hyphenated);
         assert!(rules.is_empty(), "{kept}");
         assert_eq!(kept, hyphenated);
+    }
+
+    #[test]
+    fn missing_token_shapes_are_masked_and_near_misses_stay() {
+        let cases = [
+            (
+                "glpat-SVCNGITLABTOKEN0001",
+                "glpat-SVCNGITLABTOKEN0001",
+                "gitlab-pat",
+            ),
+            (
+                "AccountKey=svcn-azure-bare-0001",
+                "svcn-azure-bare-0001",
+                "azure-account-key",
+            ),
+            (
+                "xoxb-SVCNSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS",
+                "xoxb-SVCNSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS",
+                "slack-token",
+            ),
+            (
+                "sk-admin-SVCNadminKey00000000000000000000",
+                "sk-admin-SVCNadminKey00000000000000000000",
+                "openai-api-key",
+            ),
+            (
+                "sk-svcacct-SVCNsvcacctKey000000000000000000",
+                "sk-svcacct-SVCNsvcacctKey000000000000000000",
+                "openai-api-key",
+            ),
+            (
+                "mysql -h db.example -pSVCNAgentPassw0rd",
+                "SVCNAgentPassw0rd",
+                "shell-password",
+            ),
+            (
+                "tool --password SVCNAgentPassw0rd",
+                "SVCNAgentPassw0rd",
+                "shell-password",
+            ),
+            (
+                "      \"TDH_API_TOKEN=svcn-docker-opaque-0001\",",
+                "svcn-docker-opaque-0001",
+                "env-assignment",
+            ),
+            (
+                "environ({'TDH_DB_PASSWORD': 'svcn-pytest-opaque-0001'})",
+                "svcn-pytest-opaque-0001",
+                "repr-env-assignment",
+            ),
+        ];
+        for (input, secret, rule) in cases {
+            let (out, rules) = masked(input);
+            assert!(!out.contains(secret), "{input} -> {out}");
+            assert!(rules.iter().any(|item| item == rule), "{input} {rules:?}");
+        }
+
+        let joined = "\"AKIAIOSFODNN7EXA\"\n    \"MPLE\"";
+        let (out, rules) = masked(joined);
+        assert!(!out.contains("AKIAIOSFODNN7EXA"), "{out}");
+        assert!(!out.contains("MPLE"), "{out}");
+        assert!(
+            rules.iter().any(|rule| rule == "split-string-literal"),
+            "{rules:?}"
+        );
+
+        let short_split = "\"AKIASVCNSPLIT\"\n    \"KEY001\"";
+        let (out, rules) = masked(short_split);
+        assert!(rules.is_empty(), "{out}");
+        assert_eq!(out, short_split);
+
+        let misses = "\
+gcc -pthread
+gcc -parameter
+mysql -pshort
+mysql -p changeme
+TOKEN_LIMIT=4096
+password = \"changeme\"
+glpat-short
+AccountKey=short
+sk-admin-tooshort
+";
+        let (out, rules) = masked(misses);
+        assert!(rules.is_empty(), "{rules:?}\n{out}");
+        assert_eq!(out, misses);
     }
 }
