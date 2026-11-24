@@ -225,8 +225,8 @@ fn password_secret() -> String {
     "password = \"p@ss\\word12\"".to_string()
 }
 
-fn tool_logical(placeholder: &str) -> String {
-    format!(r#"{{"cmd":"echo {placeholder}"}}"#)
+fn tool_logical(echoed: &str) -> String {
+    serde_json::json!({"cmd": format!("echo {echoed}")}).to_string()
 }
 
 fn text_logical(placeholder: &str) -> String {
@@ -433,8 +433,15 @@ async fn mock_handler(State(state): State<MockState>, req: Request<Body>) -> Res
         .get("split_b")
         .and_then(Value::as_u64)
         .map(|n| n as usize);
-    let phs = placeholders(&text);
-    let sse = match build_sse(shape, split, split_b, &phs) {
+    let content = value
+        .pointer("/messages/0/content")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    // Echo the whole masked line. A value-only rule leaves the label and
+    // quotes in place (`password = "@@sv:…@@"`), and the restored command
+    // has to match that original line exactly.
+    let lines = masked_lines(content);
+    let sse = match build_sse(shape, split, split_b, &lines) {
         Ok(sse) => sse,
         Err(err) => return plain(StatusCode::BAD_REQUEST, &err),
     };
@@ -451,6 +458,36 @@ fn plain(status: StatusCode, message: &str) -> Response {
         .header("content-type", "text/plain")
         .body(Body::from(message.to_string()))
         .unwrap()
+}
+
+/// One echo string per placeholder. A single placeholder keeps the whole
+/// masked line, so a label and quotes around it are echoed too. Several
+/// placeholders each keep only the whitespace-delimited token that holds them.
+fn masked_lines(content: &str) -> Vec<String> {
+    let found = placeholders(content);
+    if found.len() == 1 {
+        return vec![content.to_string()];
+    }
+    found
+        .iter()
+        .map(|placeholder| token_containing(content, placeholder))
+        .collect()
+}
+
+fn token_containing(content: &str, placeholder: &str) -> String {
+    let Some(start) = content.find(placeholder) else {
+        return placeholder.to_string();
+    };
+    let end = start + placeholder.len();
+    let left = match content[..start].rfind(char::is_whitespace) {
+        Some(index) => index + content[index..].chars().next().unwrap().len_utf8(),
+        None => 0,
+    };
+    let right = content[end..]
+        .find(char::is_whitespace)
+        .map(|index| end + index)
+        .unwrap_or(content.len());
+    content[left..right].to_string()
 }
 
 fn placeholders(body: &str) -> Vec<String> {
