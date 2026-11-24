@@ -56,6 +56,7 @@ pub fn boundary_for(category: Category) -> Boundary {
         | Category::Register
         | Category::Codename
         | Category::Hostname
-        | Category::Identifier => Boundary::Ident,
+        | Category::Identifier
+        | Category::Pii => Boundary::Ident,
     }
 }

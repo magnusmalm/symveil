@@ -17,6 +17,8 @@ pub enum Category {
     Ip,
     Secret,
     Identifier,
+    /// Email, phone number, or national identity number. Opt-in via `[redact.pii]`.
+    Pii,
 }
 
 impl Category {
@@ -33,6 +35,7 @@ impl Category {
             Self::Ip => "ip",
             Self::Secret => "secret",
             Self::Identifier => "identifier",
+            Self::Pii => "pii",
         }
     }
 
@@ -49,6 +52,7 @@ impl Category {
             "ip" | "ipv4" | "ipv6" => Some(Self::Ip),
             "secret" => Some(Self::Secret),
             "identifier" | "ident" => Some(Self::Identifier),
+            "pii" => Some(Self::Pii),
             _ => None,
         }
     }
@@ -56,6 +60,7 @@ impl Category {
     pub fn rank(self) -> u8 {
         match self {
             Self::Secret => 100,
+            Self::Pii => 95,
             Self::Ip => 90,
             Self::Hostname => 80,
             Self::Register => 70,

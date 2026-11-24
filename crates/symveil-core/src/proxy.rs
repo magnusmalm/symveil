@@ -13,8 +13,9 @@ use futures::StreamExt;
 use tokio::net::TcpListener;
 
 use crate::audit::AuditLog;
-use crate::redact::Engine;
-use crate::stream::ByteRestorer;
+use crate::config::Action;
+use crate::redact::{self, Engine};
+use crate::stream::{ByteRestorer, SseRestorer};
 
 const MAX_BODY: usize = 32 * 1024 * 1024;
 
@@ -161,6 +162,23 @@ async fn proxy_request(State(state): State<AppState>, req: Request<Body>) -> Res
         }
     }
 
+    if redact::contains_block(&hits) {
+        let message = redact::block_message(&hits);
+        tracing::warn!(path = %path, message = %message, "blocked request");
+        return block_response(classify(&path), &message);
+    }
+
+    for hit in hits.iter().filter(|hit| hit.action == Action::Warn) {
+        tracing::warn!(
+            path = %path,
+            rule = hit.rule.as_deref().unwrap_or(""),
+            category = %hit.category,
+            len = hit.original.len(),
+            "forwarded a match unchanged"
+        );
+    }
+    let redaction_count = redact::redact_count(&hits);
+
     let url = join_url(&base, &path_and_query);
     let upstream_method = match reqwest::Method::from_bytes(method.as_str().as_bytes()) {
         Ok(method) => method,
@@ -209,7 +227,7 @@ async fn proxy_request(State(state): State<AppState>, req: Request<Body>) -> Res
     tracing::info!(
         method = %method,
         path = %path,
-        redactions = hits.len(),
+        redactions = redaction_count,
         streaming,
         status = status.as_u16(),
         "proxied"
@@ -226,7 +244,7 @@ async fn proxy_request(State(state): State<AppState>, req: Request<Body>) -> Res
             }
         }
     }
-    if let Ok(count) = HeaderValue::from_str(&hits.len().to_string()) {
+    if let Ok(count) = HeaderValue::from_str(&redaction_count.to_string()) {
         builder = builder.header("x-symveil-redactions", count);
     }
 
@@ -276,7 +294,7 @@ fn stream_body(
     path: String,
 ) -> Body {
     let body = stream! {
-        let mut restorer = ByteRestorer::new(map, json_escape);
+        let mut restorer = SseRestorer::new(map, json_escape);
         tokio::pin!(upstream);
         while let Some(item) = upstream.next().await {
             match item {
@@ -287,6 +305,10 @@ fn stream_body(
                     }
                 }
                 Err(err) => {
+                    let tail = restorer.finish();
+                    if !tail.is_empty() {
+                        yield Ok(Bytes::from(tail));
+                    }
                     log_restored(&audit, &path, restorer.restored());
                     yield Err(std::io::Error::other(err));
                     return;
@@ -383,6 +405,41 @@ fn error_response(status: StatusCode, message: &str) -> Response {
     json_response(status, &body.to_string())
 }
 
+fn block_response(route: Route, message: &str) -> Response {
+    let mut response = json_response(StatusCode::BAD_REQUEST, &block_body(route, message));
+    response
+        .headers_mut()
+        .insert("x-should-retry", HeaderValue::from_static("false"));
+    response
+}
+
+/// Error bodies for the OpenAI and Anthropic APIs.
+///
+/// The Anthropic body repeats the sentence at the top level because the
+/// TypeScript SDK uses that field as the exception text. The nested
+/// `error.message` is what `apiMessage` reads. The matched secret is not included.
+fn block_body(route: Route, message: &str) -> String {
+    let value = match route {
+        Route::Anthropic => serde_json::json!({
+            "type": "error",
+            "message": message,
+            "error": {
+                "type": "invalid_request_error",
+                "message": message,
+            }
+        }),
+        Route::OpenAi | Route::Health | Route::Unknown => serde_json::json!({
+            "error": {
+                "message": message,
+                "type": "invalid_request_error",
+                "param": null,
+                "code": "symveil_blocked"
+            }
+        }),
+    };
+    value.to_string()
+}
+
 fn json_response(status: StatusCode, body: &str) -> Response {
     Response::builder()
         .status(status)
@@ -394,6 +451,9 @@ fn json_response(status: StatusCode, body: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::category::Category;
+    use crate::vault::Vault;
+    use futures::StreamExt;
 
     #[test]
     fn classifies_agent_paths() {
@@ -406,6 +466,56 @@ mod tests {
         assert_eq!(classify("/"), Route::Unknown);
     }
 
+    #[tokio::test]
+    async fn upstream_error_flushes_a_held_sse_event() {
+        let mut vault = Vault::ephemeral();
+        let secret = "AKIAIOSFODNN7EXAMPLE";
+        let placeholder = vault.assign(secret, Category::Secret, None).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "symveil-stream-err-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let audit = AuditLog::open(&dir.join("audit.jsonl")).unwrap();
+        let chunk = format!("data: {{\"text\":\"{placeholder}\"}}\n");
+        let err = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap()
+            .get("http://127.0.0.1:1")
+            .send()
+            .await
+            .expect_err("nothing should accept port 1");
+        let upstream = futures::stream::iter(vec![Ok(Bytes::from(chunk)), Err(err)]);
+        let body = stream_body(
+            upstream,
+            vault.restore_map(),
+            false,
+            Arc::new(Mutex::new(audit)),
+            "/v1/responses".into(),
+        );
+        let mut stream = body.into_data_stream();
+        let mut collected = String::new();
+        let mut saw_err = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(bytes) => collected.push_str(&String::from_utf8_lossy(&bytes)),
+                Err(_) => {
+                    saw_err = true;
+                    break;
+                }
+            }
+        }
+        assert!(saw_err);
+        assert!(collected.contains(secret), "{collected}");
+        assert!(!collected.contains("@@sv:"), "{collected}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn stream_flag_follows_content_type() {
         assert!(should_stream(Some("text/event-stream"), false));
@@ -413,5 +523,30 @@ mod tests {
         assert!(should_stream(None, true));
         assert!(should_json_escape(Some("text/event-stream; charset=utf-8")));
         assert!(!should_json_escape(Some("text/plain")));
+    }
+
+    #[test]
+    fn block_bodies_match_each_api() {
+        let message = "SymVeil blocked this request before sending it upstream. Matched private-key (secret, 12 bytes). Remove the secret or change its action in .symveil.toml.";
+        let openai: serde_json::Value =
+            serde_json::from_str(&block_body(Route::OpenAi, message)).unwrap();
+        assert_eq!(
+            openai["error"]["type"].as_str(),
+            Some("invalid_request_error")
+        );
+        assert_eq!(openai["error"]["message"].as_str(), Some(message));
+        assert_eq!(openai["error"]["code"].as_str(), Some("symveil_blocked"));
+        assert!(openai["error"]["param"].is_null());
+
+        let anthropic: serde_json::Value =
+            serde_json::from_str(&block_body(Route::Anthropic, message)).unwrap();
+        assert_eq!(anthropic["type"].as_str(), Some("error"));
+        assert_eq!(anthropic["message"].as_str(), Some(message));
+        assert_eq!(
+            anthropic["error"]["type"].as_str(),
+            Some("invalid_request_error")
+        );
+        assert_eq!(anthropic["error"]["message"].as_str(), Some(message));
+        assert!(!anthropic.to_string().contains("12 bytes secret"));
     }
 }
