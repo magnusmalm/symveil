@@ -41,6 +41,9 @@ struct VaultFile {
 
 pub struct Vault {
     path: Option<PathBuf>,
+    /// Stable id stored in the vault header. The keychain account is this id,
+    /// so the key still opens the file after the path changes.
+    id: String,
     key: Option<Zeroizing<[u8; 32]>>,
     key_home: Option<KeyHome>,
     backend: Backend,
@@ -60,6 +63,7 @@ impl Vault {
     pub fn ephemeral() -> Self {
         Self {
             path: None,
+            id: seal::new_id(),
             key: None,
             key_home: None,
             backend: default_backend(),
@@ -76,6 +80,7 @@ impl Vault {
     fn create_with(path: PathBuf, backend: Backend) -> Self {
         Self {
             path: Some(path),
+            id: seal::new_id(),
             key: None,
             key_home: None,
             backend,
@@ -94,7 +99,7 @@ impl Vault {
             return home.line();
         }
         if let Some(path) = &self.path {
-            return planned_location(path, &self.backend);
+            return planned_location(path, &self.backend, &self.id);
         }
         "not stored".to_string()
     }
@@ -120,7 +125,7 @@ impl Vault {
         perms::warn_if_loose_file(path);
         match seal::inspect(&bytes) {
             Ok(seal::Inspected::Plaintext) => load_plaintext(path, &bytes, backend),
-            Ok(seal::Inspected::Sealed(envelope)) => load_sealed(path, &envelope, backend),
+            Ok(seal::Inspected::Sealed(envelope)) => load_sealed(path, &bytes, &envelope, backend),
             Err(err) => Err(refused_error(path, &seal_reason(&err))),
         }
     }
@@ -143,7 +148,7 @@ impl Vault {
             .key
             .as_deref()
             .ok_or_else(|| anyhow!("internal: vault key missing after ensure"))?;
-        let sealed = seal::seal(key, payload.as_slice())
+        let sealed = seal::seal(key, payload.as_slice(), &self.id)
             .map_err(|err| refused_error(&path, &seal_reason(&err)))?;
         perms::write_atomic_private(&path, &sealed)?;
         self.dirty = false;
@@ -248,7 +253,7 @@ impl Vault {
             .path
             .clone()
             .ok_or_else(|| anyhow!("vault has no path"))?;
-        let acquired = acquire(&path, &self.backend, true)?;
+        let acquired = acquire(&path, &self.backend, true, Some(&self.id))?;
         if let Some(memory) = &self.key {
             if memory.as_ref() != acquired.key.as_ref() {
                 return Err(refused_error(
@@ -310,8 +315,13 @@ fn load_plaintext(path: &Path, bytes: &[u8], backend: Backend) -> Result<Vault> 
     Ok(vault)
 }
 
-fn load_sealed(path: &Path, envelope: &seal::Envelope, backend: Backend) -> Result<Vault> {
-    let acquired = acquire(path, &backend, false)?;
+fn load_sealed(
+    path: &Path,
+    bytes: &[u8],
+    envelope: &seal::Envelope,
+    backend: Backend,
+) -> Result<Vault> {
+    let acquired = acquire(path, &backend, false, envelope.id.as_deref())?;
     let plain = match seal::open_envelope(&acquired.key, envelope) {
         Ok(plain) => Zeroizing::new(plain),
         Err(seal::SealError::DecryptFailed) => {
@@ -331,12 +341,94 @@ fn load_sealed(path: &Path, envelope: &seal::Envelope, backend: Backend) -> Resu
             &format!("decrypted vault payload is not a version {VAULT_VERSION} vault: {err:#}"),
         )
     })?;
-    let mut vault = from_entries(path.to_path_buf(), entries, backend).map_err(|err| {
+    let mut vault = from_entries(path.to_path_buf(), entries, backend.clone()).map_err(|err| {
         refused_error(path, &format!("decrypted vault could not be read: {err:#}"))
     })?;
+    let id = match &envelope.id {
+        Some(id) => {
+            forget_legacy_if_same(path, &backend, &acquired.key);
+            id.clone()
+        }
+        None => adopt_stable_id(path, bytes, &backend, &acquired.key)?,
+    };
+    vault.id = id.clone();
     vault.key = Some(acquired.key);
-    vault.key_home = Some(acquired.home);
+    vault.key_home = Some(match acquired.home {
+        KeyHome::File(file) => KeyHome::File(file),
+        KeyHome::Keychain { .. } => KeyHome::Keychain {
+            account: keystore::key_account_for_id(&id),
+        },
+    });
     Ok(vault)
+}
+
+/// A sealed vault with no id was keyed by a hash of its path. Copy that key
+/// onto a new random id, write the id into the header, and drop the path entry.
+fn adopt_stable_id(path: &Path, bytes: &[u8], backend: &Backend, key: &[u8; 32]) -> Result<String> {
+    let id = seal::new_id();
+    let account = keystore::key_account_for_id(&id);
+    let legacy = keystore::legacy_key_account(path);
+    match backend.put(&account, key) {
+        Ok(()) => {
+            let stamped = match seal::with_id(bytes, &id) {
+                Ok(stamped) => stamped,
+                Err(err) => {
+                    let _ = backend.delete(&account);
+                    return Err(refused_error(path, &seal_reason(&err)));
+                }
+            };
+            if let Err(err) = perms::write_atomic_private(path, &stamped) {
+                let _ = backend.delete(&account);
+                return Err(err);
+            }
+            match backend.delete(&legacy) {
+                Ok(()) => eprintln!(
+                    "symveil: vault key for {} is now OS keychain account {account}. The path-based account {legacy} was removed.",
+                    path.display()
+                ),
+                Err(err) => eprintln!(
+                    "symveil: warning: vault key for {} is now OS keychain account {account}, but the path-based account {legacy} could not be removed ({}).",
+                    path.display(),
+                    key_failure_text(&err)
+                ),
+            }
+        }
+        Err(KeyFailure::Unavailable(_)) => {
+            let stamped =
+                seal::with_id(bytes, &id).map_err(|err| refused_error(path, &seal_reason(&err)))?;
+            perms::write_atomic_private(path, &stamped)?;
+            eprintln!(
+                "symveil: recorded stable vault id {id} in {} so a later keychain account does not depend on the path",
+                path.display()
+            );
+        }
+        Err(KeyFailure::Failed(reason)) => {
+            return Err(refused_error(
+                path,
+                &format!(
+                    "could not copy the path-based vault key to account {account} ({reason}). The vault file was left unchanged"
+                ),
+            ));
+        }
+    }
+    Ok(id)
+}
+
+fn forget_legacy_if_same(path: &Path, backend: &Backend, key: &[u8; 32]) {
+    let legacy = keystore::legacy_key_account(path);
+    let Ok(Some(old)) = backend.get(&legacy) else {
+        return;
+    };
+    if old.as_ref() != key || backend.delete(&legacy).is_ok() {
+        return;
+    }
+    eprintln!("symveil: warning: path-based vault key account {legacy} could not be removed");
+}
+
+fn key_failure_text(err: &KeyFailure) -> String {
+    match err {
+        KeyFailure::Unavailable(reason) | KeyFailure::Failed(reason) => reason.clone(),
+    }
 }
 
 struct Acquired {
@@ -346,8 +438,11 @@ struct Acquired {
 
 /// Find or create the key. `create` is false for a sealed vault: a missing key
 /// is an error, and no new key is written.
-fn acquire(path: &Path, backend: &Backend, create: bool) -> Result<Acquired> {
-    let account = keystore::key_account(path);
+fn acquire(path: &Path, backend: &Backend, create: bool, id: Option<&str>) -> Result<Acquired> {
+    let account = match id {
+        Some(id) => keystore::key_account_for_id(id),
+        None => keystore::legacy_key_account(path),
+    };
     let file = vault_key_path(path);
     if file.exists() {
         perms::warn_if_loose_file(&file);
@@ -356,7 +451,7 @@ fn acquire(path: &Path, backend: &Backend, create: bool) -> Result<Acquired> {
         Ok(Some(key)) => adopt_keychain_key(path, &file, &account, key),
         Ok(None) => acquire_without_keychain_entry(path, &file, backend, &account, create),
         Err(KeyFailure::Unavailable(reason)) => {
-            acquire_from_file(path, &file, create, Some(reason))
+            acquire_from_file(path, &file, &account, create, Some(reason))
         }
         Err(KeyFailure::Failed(reason)) => Err(refused_error(
             path,
@@ -460,6 +555,7 @@ fn acquire_without_keychain_entry(
 fn acquire_from_file(
     path: &Path,
     file: &Path,
+    account: &str,
     create: bool,
     reason: Option<String>,
 ) -> Result<Acquired> {
@@ -474,12 +570,7 @@ fn acquire_from_file(
         });
     }
     if !create {
-        return Err(missing_key(
-            path,
-            file,
-            &keystore::key_account(path),
-            reason,
-        ));
+        return Err(missing_key(path, file, account, reason));
     }
     let key = create_file_key(path, file)?;
     if let Some(reason) = reason.as_deref() {
@@ -543,8 +634,8 @@ fn missing_key(
     refused_error(vault, &reason)
 }
 
-fn planned_location(path: &Path, backend: &Backend) -> String {
-    let account = keystore::key_account(path);
+fn planned_location(path: &Path, backend: &Backend, id: &str) -> String {
+    let account = keystore::key_account_for_id(id);
     let file = vault_key_path(path);
     match backend.get(&account) {
         Ok(Some(_)) => KeyHome::Keychain { account }.line(),
@@ -1113,6 +1204,87 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), sealed);
         assert!(!vault_key_path(&path).exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn moving_the_vault_file_keeps_the_keychain_key() {
+        let dir = temp_dir("vault-move");
+        let path = dir.join("vault.json");
+        let secret = "moved-secret-value-77";
+        let backend = Backend::memory();
+        let mut vault = Vault::create_with(path.clone(), backend.clone());
+        let token = vault.assign(secret, Category::Secret, None).unwrap();
+        vault.save().unwrap();
+        let id = envelope_id(&path);
+        let account = keystore::key_account_for_id(&id);
+        assert!(vault.key_location_line().contains(&account));
+        assert!(key_at(&backend, &keystore::legacy_key_account(&path)).is_none());
+
+        let moved = dir.join("elsewhere").join("vault.json");
+        fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        fs::copy(&path, &moved).unwrap();
+        let loaded = Vault::load_with(&moved, backend.clone()).unwrap();
+        assert_eq!(loaded.placeholder(secret), Some(token.as_str()));
+        assert_eq!(envelope_id(&moved), id);
+        assert!(loaded.key_location_line().contains(&account));
+        assert!(key_at(&backend, &keystore::legacy_key_account(&moved)).is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_path_hash_key_is_migrated_and_then_survives_a_move() {
+        let dir = temp_dir("vault-legacy-id");
+        let path = dir.join("vault.json");
+        let secret = "legacy-secret-value-19";
+        let backend = Backend::memory();
+        let mut vault = Vault::create_with(path.clone(), backend.clone());
+        let token = vault.assign(secret, Category::Secret, None).unwrap();
+        vault.save().unwrap();
+        let old_id = envelope_id(&path);
+        let old_account = keystore::key_account_for_id(&old_id);
+        let key = key_at(&backend, &old_account).expect("saved key");
+        if backend.delete(&old_account).is_err() {
+            panic!("drop the id account");
+        }
+        let legacy = keystore::legacy_key_account(&path);
+        if backend.put(&legacy, &key).is_err() {
+            panic!("store the path-hash key");
+        }
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("id");
+        let mut bytes = serde_json::to_vec_pretty(&value).unwrap();
+        bytes.push(b'\n');
+        fs::write(&path, &bytes).unwrap();
+
+        let loaded = Vault::load_with(&path, backend.clone()).unwrap();
+        assert_eq!(loaded.placeholder(secret), Some(token.as_str()));
+        let id = envelope_id(&path);
+        assert_ne!(id, old_id);
+        let account = keystore::key_account_for_id(&id);
+        assert!(loaded.key_location_line().contains(&account));
+        assert!(key_at(&backend, &legacy).is_none());
+        assert!(key_at(&backend, &account).is_some());
+
+        let moved = dir.join("moved").join("vault.json");
+        fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        fs::copy(&path, &moved).unwrap();
+        let again = Vault::load_with(&moved, backend).unwrap();
+        assert_eq!(again.placeholder(secret), Some(token.as_str()));
+        assert_eq!(envelope_id(&moved), id);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn key_at(backend: &Backend, account: &str) -> Option<Zeroizing<[u8; 32]>> {
+        match backend.get(account) {
+            Ok(key) => key,
+            Err(_) => panic!("keychain read failed for {account}"),
+        }
+    }
+
+    fn envelope_id(path: &Path) -> String {
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        value["id"].as_str().unwrap().to_string()
     }
 
     fn saved_secret(dir: &Path, name: &str, secret: &str) -> PathBuf {

@@ -2,10 +2,11 @@
 //!
 //! The default is the OS keychain: macOS Keychain, Linux Secret Service, or
 //! Windows Credential Manager, via the `keyring` crate. The account name is
-//! `vault-key-` plus the SHA-256 of the vault path, so two vaults do not share
-//! a key. A file at `.symveil/vault.key` is used only when no keychain can be
-//! opened. A locked keychain is not that case: startup fails instead of
-//! writing a second key beside the vault.
+//! `vault-key-` plus a random id stored in the vault file, so moving the file
+//! does not lose the key. Older entries used a hash of the path and are
+//! migrated on open. A file at `.symveil/vault.key` is used only when no
+//! keychain can be opened. A locked keychain is not that case: startup fails
+//! instead of writing a second key beside the vault.
 
 #[cfg(test)]
 use std::collections::HashMap;
@@ -65,6 +66,22 @@ impl Backend {
             Self::System => os_put(account, key),
         }
     }
+
+    pub(crate) fn delete(&self, account: &str) -> Result<(), KeyFailure> {
+        match self {
+            Self::Unavailable => Err(KeyFailure::Unavailable(
+                "this process has no OS keychain".to_string(),
+            )),
+            #[cfg(test)]
+            Self::Memory(map) => {
+                let mut guard = map.lock().unwrap_or_else(|err| err.into_inner());
+                guard.remove(account);
+                Ok(())
+            }
+            #[cfg(not(test))]
+            Self::System => os_delete(account),
+        }
+    }
 }
 
 pub(crate) enum KeyFailure {
@@ -93,7 +110,14 @@ impl KeyHome {
     }
 }
 
-pub(crate) fn key_account(vault: &Path) -> String {
+pub(crate) fn key_account_for_id(id: &str) -> String {
+    format!("vault-key-{id}")
+}
+
+/// Account used before the vault file carried its own id. Opening that vault
+/// at the same path copies the key onto [`key_account_for_id`] and deletes this
+/// entry.
+pub(crate) fn legacy_key_account(vault: &Path) -> String {
     let canonical = std::fs::canonicalize(vault).unwrap_or_else(|_| vault.to_path_buf());
     let mut hasher = Sha256::new();
     hasher.update(canonical.to_string_lossy().as_bytes());
@@ -146,6 +170,19 @@ fn os_put(account: &str, key: &[u8; 32]) -> Result<(), KeyFailure> {
     }
     let entry = keyring::Entry::new(SERVICE, account).map_err(classify)?;
     entry.set_secret(key).map_err(classify)
+}
+
+#[cfg(not(test))]
+fn os_delete(account: &str) -> Result<(), KeyFailure> {
+    if let Err(err) = keyring::Entry::store_status() {
+        return Err(KeyFailure::Unavailable(err.to_string()));
+    }
+    let entry = keyring::Entry::new(SERVICE, account).map_err(classify)?;
+    match entry.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(err) => Err(classify(err)),
+    }
 }
 
 #[cfg(not(test))]

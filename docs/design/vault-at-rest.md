@@ -55,9 +55,15 @@ The 32-byte AES key is stored in the OS keychain through the `keyring` crate:
 | Linux | Secret Service |
 | Windows | Credential Manager |
 
-The service name is `symveil`. The account is `vault-key-` plus the SHA-256
-hex of the vault path, so two vaults do not share a key. The keychain holds
-the raw 32 bytes. There is no passphrase and no KDF.
+The service name is `symveil`. The account is `vault-key-` plus a random
+128-bit id stored in the cleartext vault header, so two vaults do not share a
+key and moving the file does not lose it. The keychain holds the raw 32 bytes.
+There is no passphrase and no KDF.
+
+A vault sealed before that id existed used `vault-key-` plus the SHA-256 hex
+of the path. The next open at that same path copies the key to a new id
+account, writes the id into the header, and deletes the path-based entry.
+Opening it only after the path has already changed cannot find that old entry.
 
 A file is the fallback, and only then. When the keychain cannot be opened at
 all (no Secret Service, no login keychain, a headless session), SymVeil writes
@@ -99,11 +105,17 @@ Version 2 envelope, pretty-printed JSON:
 ```json
 {
   "version": 2,
+  "id": "<32 lowercase hex chars>",
   "cipher": "aes-256-gcm",
   "nonce": "<standard base64>",
   "ciphertext": "<standard base64 of ciphertext and tag>"
 }
 ```
+
+`id` is not part of the GCM associated data. Changing it makes the file look
+up a different keychain account, and decryption with the wrong key fails. An
+envelope with no `id` is the path-hash format and is migrated as described
+above. The ciphertext is not rewritten for that migration.
 
 The decrypted payload is the historical version 1 document: `version` and
 `entries` (original, placeholder, category, rule). Placeholders are unchanged
@@ -160,9 +172,9 @@ There is no escrow and no recovery.
   modified: AES-GCM verification fails. The vault is left as it is.
 - Deleting the vault and its key starts a new map. Old placeholders in
   transcripts stay unrestorable. That is a manual choice; SymVeil does not do
-  it on error. Moving the vault to a new path changes the keychain account
-  (it is a hash of the path), so the old entry is not found. Put the key file
-  next to the vault, or the path has to stay the same.
+  it on error. Moving a vault that already has an `id` keeps the same
+  keychain account. A vault that still uses the path hash has to be opened
+  once at the old path so the key can be copied onto an id.
 
 The error text says the vault was left unchanged and that it will not be
 replaced with an empty vault. `symveil proxy` exits before it listens.

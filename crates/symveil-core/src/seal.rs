@@ -18,6 +18,7 @@ use crate::perms;
 
 pub(crate) const CIPHER_NAME: &str = "aes-256-gcm";
 pub(crate) const KEY_HEADER: &str = "symveil-vault-key-v1";
+pub(crate) const ID_LEN: usize = 32;
 const AAD: &[u8] = b"symveil-vault-v2 aes-256-gcm";
 const SEALED_VERSION: u32 = 2;
 const NONCE_LEN: usize = 12;
@@ -46,6 +47,9 @@ pub(crate) enum KeyError {
 pub(crate) struct Envelope {
     nonce: [u8; NONCE_LEN],
     ciphertext: Vec<u8>,
+    /// Stable id from the cleartext header. Absent on a vault sealed before
+    /// the keychain account stopped using a hash of the path.
+    pub(crate) id: Option<String>,
 }
 
 pub(crate) enum Inspected {
@@ -56,6 +60,9 @@ pub(crate) enum Inspected {
 #[derive(Serialize, Deserialize)]
 struct SealedFile {
     version: u32,
+    /// Random 128-bit id, hex. The keychain account is this id, not the path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
     cipher: String,
     nonce: String,
     ciphertext: String,
@@ -96,7 +103,10 @@ pub(crate) fn open_envelope(key: &[u8; 32], envelope: &Envelope) -> Result<Vec<u
         .map_err(|_| SealError::DecryptFailed)
 }
 
-pub(crate) fn seal(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, SealError> {
+pub(crate) fn seal(key: &[u8; 32], plaintext: &[u8], id: &str) -> Result<Vec<u8>, SealError> {
+    if !valid_id(id) {
+        return Err(SealError::Malformed("id"));
+    }
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| SealError::Crypto)?;
     let nonce = random_nonce();
     let ciphertext = cipher
@@ -110,6 +120,7 @@ pub(crate) fn seal(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, SealErro
         .map_err(|_| SealError::Crypto)?;
     let file = SealedFile {
         version: SEALED_VERSION,
+        id: Some(id.to_string()),
         cipher: CIPHER_NAME.to_string(),
         nonce: STANDARD.encode(nonce),
         ciphertext: STANDARD.encode(ciphertext),
@@ -165,7 +176,59 @@ fn parse_envelope(bytes: &[u8]) -> Result<Envelope, SealError> {
     if ciphertext.len() < TAG_LEN {
         return Err(SealError::Malformed("ciphertext"));
     }
-    Ok(Envelope { nonce, ciphertext })
+    let id = match file.id {
+        Some(id) if valid_id(&id) => Some(id),
+        Some(_) => return Err(SealError::Malformed("id")),
+        None => None,
+    };
+    Ok(Envelope {
+        nonce,
+        ciphertext,
+        id,
+    })
+}
+
+/// Record `id` on an existing envelope without re-encrypting it.
+pub(crate) fn with_id(bytes: &[u8], id: &str) -> Result<Vec<u8>, SealError> {
+    if !valid_id(id) {
+        return Err(SealError::Malformed("id"));
+    }
+    let mut value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| SealError::NotJson)?;
+    let Some(obj) = value.as_object_mut() else {
+        return Err(SealError::NotObject);
+    };
+    if obj.get("version").and_then(serde_json::Value::as_u64) != Some(u64::from(SEALED_VERSION)) {
+        return Err(SealError::Malformed("envelope"));
+    }
+    obj.insert("id".into(), serde_json::Value::String(id.to_string()));
+    let mut out = serde_json::to_vec_pretty(&value).map_err(|_| SealError::Crypto)?;
+    out.push(b'\n');
+    Ok(out)
+}
+
+pub(crate) fn new_id() -> String {
+    use aes_gcm::aead::rand_core::RngCore;
+    let mut raw = [0u8; ID_LEN / 2];
+    OsRng.fill_bytes(&mut raw);
+    hex_encode(&raw)
+}
+
+pub(crate) fn valid_id(id: &str) -> bool {
+    id.len() == ID_LEN
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn decode_nonce(text: &str) -> Result<[u8; NONCE_LEN], SealError> {
@@ -227,7 +290,7 @@ mod tests {
     fn round_trip_hides_the_plaintext_and_rejects_the_other_key() {
         let secret = b"round-trip-secret-4e91";
         let key = generate_key();
-        let sealed = seal(&key, secret).unwrap();
+        let sealed = seal(&key, secret, &new_id()).unwrap();
         assert!(!sealed.windows(secret.len()).any(|window| window == secret));
         let Inspected::Sealed(envelope) = inspect(&sealed).unwrap() else {
             panic!("sealed file classified as plaintext");
