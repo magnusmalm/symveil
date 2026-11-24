@@ -234,18 +234,22 @@ impl PiiSection {
     }
 }
 
-/// Company, product, and project names for the free-core masker.
+/// Company, product, project, and person names for the free-core masker.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct NamesSection {
     pub terms: Vec<String>,
     /// Project-code regexes, used as written. `TDH-\d+` is a typical entry.
     pub patterns: Vec<UserPattern>,
+    /// Person names. Each entry is `First Last` (more tokens are allowed).
+    /// Matched case-insensitively as the full sequence, as `Last, First`, and
+    /// as each token on a word boundary.
+    pub people: Vec<String>,
 }
 
 impl NamesSection {
     pub fn enabled(&self) -> bool {
-        !self.terms.is_empty() || !self.patterns.is_empty()
+        !self.terms.is_empty() || !self.patterns.is_empty() || !self.people.is_empty()
     }
 }
 
@@ -277,7 +281,7 @@ pub struct RedactSection {
     pub high_entropy: bool,
     #[serde(default)]
     pub pii: PiiSection,
-    /// Company, product, and project names. Empty leaves names untouched.
+    /// Company, product, project, and person names. Empty leaves names untouched.
     #[serde(default)]
     pub names: NamesSection,
 }
@@ -440,6 +444,19 @@ mod tests {
         assert!(cfg.redact.pii.email);
         assert!(!cfg.redact.pii.phone);
         assert!(cfg.redact.pii.personnummer);
+
+        let names: Config = toml::from_str(
+            "[redact.names]\nterms = [\"Exempla\"]\npeople = [\"Ren Testdotter\"]\n",
+        )
+        .unwrap();
+        assert_eq!(names.redact.names.terms, vec!["Exempla".to_string()]);
+        assert_eq!(
+            names.redact.names.people,
+            vec!["Ren Testdotter".to_string()]
+        );
+        assert!(names.redact.names.patterns.is_empty());
+        let legacy: Config = toml::from_str("[redact.names]\nterms = [\"Exempla\"]\n").unwrap();
+        assert!(legacy.redact.names.people.is_empty());
 
         let err = toml::from_str::<Config>("[redact.pii]\nnames = true\n").unwrap_err();
         let message = err.to_string();

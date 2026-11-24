@@ -2,8 +2,8 @@
 //! cloud model and restores them in the response. Personal-data rules are
 //! installed only when `[redact.pii]` turns them on.
 //!
-//! Company, product, and project names are masked when `[redact.names]` lists
-//! them. The identifier index is a [`Masker`] plugin loaded by the `symveil`
+//! Company, product, project, and person names are masked when `[redact.names]`
+//! lists them. The identifier index is a [`Masker`] plugin loaded by the `symveil`
 //! binary when that binary is built with the `identifiers` feature.
 
 #![forbid(unsafe_code)]

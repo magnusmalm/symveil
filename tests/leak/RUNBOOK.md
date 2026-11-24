@@ -26,6 +26,10 @@ internal_domains = ["corp", "internal", "lan"]
 email = true
 phone = true
 personnummer = true
+
+[redact.names]
+terms = ["Exempla", "Tundrahorn", "TDH"]
+people = ["Ren Testdotter"]
 ```
 
 Confirm the mock received the request and that planted secrets are `@@sv:…@@` placeholders. If the mock records **nothing**, the client bypassed SymVeil. That is a failed check, not a pass.
@@ -76,4 +80,4 @@ Server-side tools (web search, code interpreter) run at the provider when a real
 
 ## 4. What counts as a pass
 
-A real-client pass is: the mock (and then the real upstream, if you capture it) shows no gated canary, placeholders restore in the tool output you see locally, and the title-bypass check above is clean. Company and code names will still be visible on this free build. That alone keeps the safe-for-work-code verdict at NOT SAFE until a build that actually masks them has three clean runs and this real-client pass.
+A real-client pass is: the mock (and then the real upstream, if you capture it) shows no gated canary, placeholders restore in the tool output you see locally, and the title-bypass check above is clean. Configured company, project, and person names in `[redact.names]` are masked on this free build. Usernames are not. A path is masked only where a configured term or person token appears. Safe for work use still needs three consecutive clean runs and this real-client pass.

@@ -1,7 +1,7 @@
 //! SymVeil command-line crate.
 //!
-//! The free build masks secrets, and company, product, and project names when
-//! `[redact.names]` lists them. Personal-data rules are off unless
+//! The free build masks secrets, and company, product, project, and person names
+//! when `[redact.names]` lists them. Personal-data rules are off unless
 //! `.symveil.toml` enables them. `--features identifiers` links the proprietary
 //! identifier index.
 

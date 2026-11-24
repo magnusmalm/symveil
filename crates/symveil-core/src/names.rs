@@ -1,9 +1,14 @@
-//! Configurable company, product, and project names.
+//! Configurable company, product, project, and person names.
 //!
 //! Terms are matched case-insensitively. `-`, `_`, or `.` may sit between
 //! letters (`Exem-pla`). A trailing Swedish suffix (`-s`, `-en`, `-et`, and
 //! the common plural forms) is part of the match. A project-code regex is
 //! used as written.
+//!
+//! A person entry such as `Ren Testdotter` matches that sequence with any
+//! whitespace between tokens, the `Last, First` form, and each token on its
+//! own when the token is bounded by a non-alphanumeric character. A token
+//! does not match inside a longer word (`Ren` does not match `render`).
 
 use anyhow::{bail, Context, Result};
 use regex::Regex;
@@ -22,6 +27,9 @@ pub fn validate(names: &NamesSection) -> Result<()> {
         if term_letters(term).len() < MIN_TERM_CHARS {
             bail!("name term `{term}` needs at least {MIN_TERM_CHARS} letters or digits");
         }
+    }
+    for person in &names.people {
+        person_tokens(person)?;
     }
     for pattern in &names.patterns {
         check_pattern(pattern)?;
@@ -44,8 +52,13 @@ struct Term {
     letters: Vec<char>,
 }
 
+struct Person {
+    tokens: Vec<Vec<char>>,
+}
+
 pub struct NameMasker {
     terms: Vec<Term>,
+    people: Vec<Person>,
     patterns: Vec<(String, Regex)>,
 }
 
@@ -59,11 +72,24 @@ impl NameMasker {
                 letters: term_letters(term),
             })
             .collect();
+        let people = names
+            .people
+            .iter()
+            .map(|person| {
+                Ok(Person {
+                    tokens: person_tokens(person)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let mut patterns = Vec::with_capacity(names.patterns.len());
         for pattern in &names.patterns {
             patterns.push((pattern.name.clone(), Regex::new(&pattern.regex)?));
         }
-        Ok(Self { terms, patterns })
+        Ok(Self {
+            terms,
+            people,
+            patterns,
+        })
     }
 }
 
@@ -93,6 +119,7 @@ impl Masker for NameMasker {
                 }
             }
         }
+        self.collect_people(&chars, &mut out);
         for (name, regex) in &self.patterns {
             for matched in regex.find_iter(text) {
                 if matched.start() == matched.end() {
@@ -105,6 +132,47 @@ impl Masker for NameMasker {
     }
 }
 
+impl NameMasker {
+    fn collect_people(&self, chars: &[(usize, char)], out: &mut Vec<Candidate>) {
+        for person in &self.people {
+            let mut index = 0;
+            while index < chars.len() {
+                if !start_boundary(chars, index) {
+                    index += 1;
+                    continue;
+                }
+                let end = match_sequence(chars, index, &person.tokens)
+                    .or_else(|| match_last_comma_first(chars, index, &person.tokens));
+                let Some(end) = end else {
+                    index += 1;
+                    continue;
+                };
+                out.push(candidate(chars[index].0, end, "person-name"));
+                while index < chars.len() && chars[index].0 < end {
+                    index += 1;
+                }
+            }
+            for token in &person.tokens {
+                let mut index = 0;
+                while index < chars.len() {
+                    if !start_boundary(chars, index) {
+                        index += 1;
+                        continue;
+                    }
+                    let Some(end) = match_token(chars, index, token) else {
+                        index += 1;
+                        continue;
+                    };
+                    out.push(candidate(chars[index].0, end, "person-name"));
+                    while index < chars.len() && chars[index].0 < end {
+                        index += 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn candidate(start: usize, end: usize, rule: &str) -> Candidate {
     Candidate {
         start,
@@ -114,6 +182,25 @@ fn candidate(start: usize, end: usize, rule: &str) -> Candidate {
         priority: PRI_PATTERN,
         boundary: Boundary::None,
     }
+}
+
+fn person_tokens(person: &str) -> Result<Vec<Vec<char>>> {
+    let tokens: Vec<Vec<char>> = person
+        .split_whitespace()
+        .map(term_letters)
+        .filter(|letters| !letters.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        bail!("person name `{person}` has no letters or digits");
+    }
+    for token in &tokens {
+        if token.len() < MIN_TERM_CHARS {
+            bail!(
+                "person name `{person}` has a token shorter than {MIN_TERM_CHARS} letters or digits"
+            );
+        }
+    }
+    Ok(tokens)
 }
 
 fn term_letters(term: &str) -> Vec<char> {
@@ -188,6 +275,78 @@ fn end_boundary(text: &str, end: usize) -> bool {
     }
 }
 
+/// One token, with no separator inside it. The caller has already checked the
+/// start boundary.
+fn match_token(chars: &[(usize, char)], start: usize, letters: &[char]) -> Option<usize> {
+    if letters.is_empty() {
+        return None;
+    }
+    let mut pos = start;
+    for &letter in letters {
+        if pos >= chars.len() || !same_letter(chars[pos].1, letter) {
+            return None;
+        }
+        pos += 1;
+    }
+    if pos < chars.len() && chars[pos].1.is_alphanumeric() {
+        return None;
+    }
+    Some(char_end(chars, pos - 1))
+}
+
+fn match_sequence(chars: &[(usize, char)], start: usize, tokens: &[Vec<char>]) -> Option<usize> {
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut pos = start;
+    let mut end = 0;
+    for (index, token) in tokens.iter().enumerate() {
+        if index > 0 {
+            if pos >= chars.len() || !chars[pos].1.is_whitespace() {
+                return None;
+            }
+            while pos < chars.len() && chars[pos].1.is_whitespace() {
+                pos += 1;
+            }
+        }
+        end = match_token(chars, pos, token)?;
+        while pos < chars.len() && chars[pos].0 < end {
+            pos += 1;
+        }
+    }
+    Some(end)
+}
+
+/// `Last, First` for a two-token name, and `Last, First Middle` when more
+/// tokens were configured. Whitespace around the comma is optional.
+fn match_last_comma_first(
+    chars: &[(usize, char)],
+    start: usize,
+    tokens: &[Vec<char>],
+) -> Option<usize> {
+    let (last, rest) = tokens.split_last()?;
+    if rest.is_empty() {
+        return None;
+    }
+    let mut pos = start;
+    let last_end = match_token(chars, pos, last)?;
+    while pos < chars.len() && chars[pos].0 < last_end {
+        pos += 1;
+    }
+    while pos < chars.len() && chars[pos].1.is_whitespace() {
+        pos += 1;
+    }
+    if pos >= chars.len() || chars[pos].1 != ',' {
+        return None;
+    }
+    pos += 1;
+    while pos < chars.len() && chars[pos].1.is_whitespace() {
+        pos += 1;
+    }
+    let rest_end = match_sequence(chars, pos, rest)?;
+    Some(rest_end)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +388,14 @@ mod tests {
                     category: None,
                 },
             ],
+            people: Vec::new(),
+        }
+    }
+
+    fn people() -> NamesSection {
+        NamesSection {
+            people: vec!["Ren Testdotter".into()],
+            ..NamesSection::default()
         }
     }
 
@@ -315,5 +482,67 @@ mod tests {
             "Exempla stays until it is configured",
         );
         assert_eq!(out, "Exempla stays until it is configured");
+    }
+
+    #[test]
+    fn people_match_case_order_and_a_single_token() {
+        let names = people();
+        let wholes = [
+            "Ren Testdotter",
+            "REN TESTDOTTER",
+            "ren   testdotter",
+            "Testdotter, Ren",
+            "testdotter,  ren",
+            "TESTDOTTER,REN",
+        ];
+        for sample in wholes {
+            let out = masked(names.clone(), sample);
+            assert!(
+                out.starts_with("@@sv:") && out.ends_with("@@") && out.matches("@@").count() == 2,
+                "{sample} -> {out}"
+            );
+        }
+
+        let hello = masked(names.clone(), "Hello Ren.");
+        assert!(hello.starts_with("Hello "), "{hello}");
+        assert!(hello.ends_with('.'), "{hello}");
+        assert!(!hello.contains("Ren"), "{hello}");
+
+        let file = masked(names.clone(), "the Testdotter file");
+        assert!(file.starts_with("the "), "{file}");
+        assert!(file.ends_with(" file"), "{file}");
+        assert!(!file.contains("Testdotter"), "{file}");
+
+        let hyphen = masked(names, "Ren-Testdotter");
+        assert!(
+            !hyphen.contains("Ren") && !hyphen.contains("Testdotter"),
+            "{hyphen}"
+        );
+        assert_eq!(hyphen.matches("@@sv:").count(), 2, "{hyphen}");
+    }
+
+    #[test]
+    fn person_tokens_do_not_match_inside_a_word() {
+        let input = "render rental parent pre-render testdottery or the rent";
+        let out = masked(people(), input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn a_short_person_token_is_rejected() {
+        let built = Engine::new(
+            Vault::ephemeral(),
+            &RedactSection {
+                names: NamesSection {
+                    people: vec!["Al Smith".into()],
+                    ..NamesSection::default()
+                },
+                ..RedactSection::default()
+            },
+        );
+        let Err(error) = built else {
+            panic!("a two-character person token was accepted");
+        };
+        assert!(error.to_string().contains("Al Smith"), "{error}");
     }
 }
