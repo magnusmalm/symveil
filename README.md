@@ -20,7 +20,7 @@ Builtin rules, always on:
 - Google API keys
 - Stripe live secrets
 - PEM private keys
-- Quoted `api_key`, `apikey`, `secret`, `token`, and `password` assignments (the value only), including `"password": "…"` when that object is text inside a string
+- Quoted `api_key`, `apikey`, `secret`, `token`, and `password` assignments (the value only), including a JSON object whose key is one of those words. The same walk scans JSON object keys and the decimal text of JSON numbers.
 - `.env` assignments whose names are uppercase and end in `_KEY`, `_SECRET`, `_TOKEN`, `_PASSWORD`, or `_PASS`. A leading `export`, spaces around `=`, single or double quotes, and a trailing `#` comment are recognized. An unquoted value may contain spaces and runs until that comment. Only the value is masked.
 - OpenAI keys: `sk-` plus 48 alphanumeric characters, and `sk-proj-` keys
 - Anthropic keys that start with `sk-ant-`
