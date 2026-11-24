@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex};
+use std::fmt::Write;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -20,6 +21,8 @@ struct MockState {
     hits: Arc<Mutex<Vec<Recorded>>>,
     sse: bool,
     body: Arc<Vec<u8>>,
+    echo: bool,
+    chunk: usize,
 }
 
 struct Recorded {
@@ -177,9 +180,683 @@ async fn messages_and_responses_go_to_the_right_upstream() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Synthetic values only: `example.com`, reserved `555` numbering, and
-/// checksum-valid identity numbers dated 2099 (not issued to a person).
-/// The literals are locked by `pii::tests::synthetic_checksum_fixtures`.
+#[tokio::test]
+async fn tool_results_mask_env_and_token_shapes_and_restore_them() {
+    let legacy = format!("sk-{}", "A".repeat(48));
+    let project = format!("sk-proj-{}", "C".repeat(32));
+    let anthropic = format!("sk-ant-{}", "E".repeat(24));
+    let header = "eyJhbGciOiJub25lIn0";
+    let payload = "eyJzdWIiOiJmYWtlIn0";
+    let signature = "ZmFrZXNpZ25hdHVyZQ";
+    let jwt = format!("{header}.{payload}.{signature}");
+    let db_password = "hunter2hunter2";
+    let url_password = "notarealpassword";
+    let service = "svc_fake_token_value";
+    let env_file = format!(
+        "\
+# local
+export OPENAI_API_KEY={legacy}
+OPENAI_PROJECT_KEY={project}
+ANTHROPIC_API_KEY={anthropic}
+DATABASE_PASSWORD=\"{db_password}\"
+export DATABASE_URL=postgres://app:{url_password}@db.example/app
+AUTH_TOKEN={jwt}
+SERVICE_TOKEN={service} # rotated
+TOKEN_LIMIT=4096
+MAX_TOKEN=12345678
+API_KEY=changeme
+API_KEY=${{OTHER_API_KEY}}
+"
+    );
+    let secrets = [
+        legacy.as_str(),
+        project.as_str(),
+        anthropic.as_str(),
+        db_password,
+        url_password,
+        signature,
+        service,
+    ];
+    let keepers = [
+        "OPENAI_API_KEY",
+        "OPENAI_PROJECT_KEY",
+        "ANTHROPIC_API_KEY",
+        "DATABASE_PASSWORD",
+        "DATABASE_URL",
+        "AUTH_TOKEN",
+        "SERVICE_TOKEN",
+        "postgres://app:",
+        "@db.example/app",
+        "# rotated",
+        "TOKEN_LIMIT=4096",
+        "MAX_TOKEN=12345678",
+        "API_KEY=changeme",
+        "API_KEY=${OTHER_API_KEY}",
+    ];
+
+    let redact = RedactSection {
+        internal_domains: Vec::new(),
+        ..RedactSection::default()
+    };
+    let engine = build_engine(Vault::ephemeral(), &redact).unwrap();
+    let (openai, openai_hits) = spawn_echo(true).await;
+    let (anthropic_base, anthropic_hits) = spawn_echo(false).await;
+    let dir = temp_dir("audit-env");
+    let audit_path = dir.join("audit.jsonl");
+    let state = AppState::new(
+        engine,
+        openai,
+        anthropic_base,
+        AuditLog::open(&audit_path).unwrap(),
+        30,
+    )
+    .unwrap();
+    let proxy = spawn_proxy(state).await;
+    let client = reqwest::Client::new();
+
+    let messages = serde_json::json!({
+        "model": "claude-test",
+        "max_tokens": 64,
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "toolu_fake",
+                "content": env_file,
+            }]
+        }]
+    });
+    let messages_response = client
+        .post(format!("{proxy}/v1/messages"))
+        .header("content-type", "application/json")
+        .header("x-api-key", "sk-ant-test")
+        .body(messages.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(messages_response.status(), 200);
+    let messages_body = messages_response.text().await.unwrap();
+    assert_restored(&messages_body, &secrets, &keepers);
+    {
+        let seen = anthropic_hits.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].path, "/v1/messages");
+        let forwarded = String::from_utf8_lossy(&seen[0].body);
+        assert_masked(&forwarded, &secrets, &keepers);
+    }
+
+    let responses = serde_json::json!({
+        "model": "gpt-test",
+        "stream": true,
+        "input": [{
+            "type": "function_call_output",
+            "call_id": "call_fake",
+            "output": env_file,
+        }]
+    });
+    let responses_response = client
+        .post(format!("{proxy}/v1/responses"))
+        .header("content-type", "application/json")
+        .body(responses.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(responses_response.status(), 200);
+    let responses_body = responses_response.text().await.unwrap();
+    assert_restored(&responses_body, &secrets, &keepers);
+    {
+        let seen = openai_hits.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].path, "/v1/responses");
+        let forwarded = String::from_utf8_lossy(&seen[0].body);
+        assert_masked(&forwarded, &secrets, &keepers);
+    }
+
+    let audit = std::fs::read_to_string(&audit_path).unwrap();
+    for secret in secrets {
+        assert!(!audit.contains(secret), "{audit}");
+    }
+    for rule in [
+        "openai-api-key",
+        "anthropic-api-key",
+        "jwt",
+        "url-password",
+        "env-assignment",
+        "env-quoted-assignment",
+    ] {
+        assert!(audit.contains(rule), "{audit}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn assert_masked(body: &str, secrets: &[&str], keepers: &[&str]) {
+    for secret in secrets {
+        assert!(!body.contains(secret), "leaked {secret} in {body}");
+    }
+    for keeper in keepers {
+        assert!(body.contains(keeper), "missing {keeper} in {body}");
+    }
+}
+
+fn assert_restored(body: &str, secrets: &[&str], keepers: &[&str]) {
+    for secret in secrets {
+        assert!(body.contains(secret), "unrestored {secret} in {body}");
+    }
+    for keeper in keepers {
+        assert!(body.contains(keeper), "missing {keeper} in {body}");
+    }
+}
+
+async fn spawn_echo(sse: bool) -> (String, Arc<Mutex<Vec<Recorded>>>) {
+    spawn_mock_inner(Vec::new(), sse, true, 7).await
+}
+
+async fn spawn_mock(body: Vec<u8>, sse: bool) -> (String, Arc<Mutex<Vec<Recorded>>>) {
+    spawn_mock_inner(body, sse, false, 1).await
+}
+
+async fn spawn_mock_inner(
+    body: Vec<u8>,
+    sse: bool,
+    echo: bool,
+    chunk: usize,
+) -> (String, Arc<Mutex<Vec<Recorded>>>) {
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let state = MockState {
+        hits: Arc::clone(&hits),
+        sse,
+        body: Arc::new(body),
+        echo,
+        chunk,
+    };
+    let app = Router::new().fallback(any(mock_handler)).with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), hits)
+}
+
+async fn mock_handler(State(state): State<MockState>, req: Request<Body>) -> Response {
+    let path = req.uri().path().to_string();
+    let headers = req.headers().clone();
+    let body = axum::body::to_bytes(req.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    state.hits.lock().unwrap().push(Recorded {
+        path,
+        body: body.to_vec(),
+        authorization: header_string(&headers, "authorization"),
+        api_key: header_string(&headers, "x-api-key"),
+        accept_encoding: header_string(&headers, "accept-encoding"),
+    });
+    let payload = if state.echo {
+        body.to_vec()
+    } else {
+        (*state.body).clone()
+    };
+    if state.sse {
+        let chunks = stream_chunks(payload, state.chunk.max(1));
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .body(Body::from_stream(chunks))
+            .unwrap()
+    } else {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(payload))
+            .unwrap()
+    }
+}
+
+fn stream_chunks(
+    data: Vec<u8>,
+    size: usize,
+) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    async_stream::stream! {
+        let mut index = 0;
+        while index < data.len() {
+            let end = (index + size).min(data.len());
+            yield Ok(Bytes::copy_from_slice(&data[index..end]));
+            index = end;
+        }
+    }
+}
+
+fn header_string(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+}
+
+async fn spawn_proxy(state: AppState) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        symveil::proxy::serve(listener, state).await.unwrap();
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let url = format!("http://{addr}");
+    for _ in 0..50 {
+        if client.get(format!("{url}/health")).send().await.is_ok() {
+            return url;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("proxy did not start");
+}
+
+#[tokio::test]
+async fn rule_actions_on_messages_and_responses() {
+    let _logs = install_logs();
+    let secret = "widget_tok_abcd1234";
+    let rule = "widget-token";
+    let base = r#"
+        [redact]
+        internal_domains = []
+
+        [[redact.secrets]]
+        name = "widget-token"
+        regex = '\bwidget_tok_[A-Za-z0-9]{8}\b'
+    "#;
+
+    run_case(Case {
+        name: "default-redact",
+        config: base,
+        marker: secret,
+        text: &format!("token {secret}"),
+        rule,
+        kind: Kind::Redact,
+    })
+    .await;
+
+    run_case(Case {
+        name: "explicit-warn",
+        config: &format!("{base}\naction = \"warn\"\n"),
+        marker: secret,
+        text: &format!("token {secret}"),
+        rule,
+        kind: Kind::Warn,
+    })
+    .await;
+
+    run_case(Case {
+        name: "explicit-block",
+        config: &format!("{base}\naction = \"block\"\n"),
+        marker: secret,
+        text: &format!("token {secret}"),
+        rule,
+        kind: Kind::Block,
+    })
+    .await;
+
+    run_case(Case {
+        name: "observe-overrides-block",
+        config: r#"
+            [redact]
+            mode = "observe"
+            internal_domains = []
+
+            [redact.builtin]
+            aws-access-key-id = "block"
+        "#,
+        marker: "AKIAIOSFODNN7EXAMPLE",
+        text: "key AKIAIOSFODNN7EXAMPLE",
+        rule: "aws-access-key-id",
+        kind: Kind::Warn,
+    })
+    .await;
+
+    let pem = "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----";
+    run_case(Case {
+        name: "builtin-private-key-block",
+        config: r#"
+            [redact]
+            internal_domains = []
+
+            [redact.builtin]
+            private-key = "block"
+        "#,
+        marker: "not-a-real-key",
+        text: pem,
+        rule: "private-key",
+        kind: Kind::Block,
+    })
+    .await;
+}
+
+struct Case<'a> {
+    name: &'a str,
+    config: &'a str,
+    marker: &'a str,
+    text: &'a str,
+    rule: &'a str,
+    kind: Kind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Redact,
+    Warn,
+    Block,
+}
+
+async fn run_case(case: Case<'_>) {
+    let redact = symveil::config::Config::parse(case.config)
+        .unwrap_or_else(|err| panic!("{}: parse config: {err:#}", case.name))
+        .redact;
+    let placeholder = match case.kind {
+        Kind::Redact => Some(placeholder_for(&redact, case.text, case.marker)),
+        Kind::Warn | Kind::Block => None,
+    };
+    let echo = placeholder
+        .clone()
+        .unwrap_or_else(|| "upstream-ok".to_string());
+    let (openai, openai_hits) =
+        spawn_mock(format!(r#"{{"output_text":"{echo}"}}"#).into_bytes(), false).await;
+    let (anthropic, anthropic_hits) = spawn_mock(
+        format!(
+            r#"{{"id":"msg_test","type":"message","role":"assistant","content":[{{"type":"text","text":"{echo}"}}]}}"#
+        )
+        .into_bytes(),
+        false,
+    )
+    .await;
+    let dir = temp_dir(&format!("actions-{}", case.name));
+    let audit_path = dir.join("audit.jsonl");
+    let state = AppState::new(
+        build_engine(Vault::ephemeral(), &redact).unwrap(),
+        openai,
+        anthropic,
+        AuditLog::open(&audit_path).unwrap(),
+        30,
+    )
+    .unwrap();
+    let proxy = spawn_proxy(state).await;
+    let client = reqwest::Client::new();
+    let payload = serde_json::to_string(case.text).unwrap();
+
+    check_endpoint(
+        &case,
+        &client,
+        &proxy,
+        "/v1/responses",
+        &format!(r#"{{"model":"gpt-test","input":{payload}}}"#),
+        &openai_hits,
+        placeholder.as_deref(),
+    )
+    .await;
+    check_endpoint(
+        &case,
+        &client,
+        &proxy,
+        "/v1/messages",
+        &format!(
+            r#"{{"model":"claude-test","max_tokens":16,"messages":[{{"role":"user","content":{payload}}}]}}"#
+        ),
+        &anthropic_hits,
+        placeholder.as_deref(),
+    )
+    .await;
+
+    let audit = std::fs::read_to_string(&audit_path).unwrap();
+    assert!(
+        !audit.contains(case.marker),
+        "{}: audit contains the matched value:\n{audit}",
+        case.name
+    );
+    assert!(
+        audit.contains(case.rule),
+        "{}: audit missing rule {}:\n{audit}",
+        case.name,
+        case.rule
+    );
+    let action = match case.kind {
+        Kind::Redact => "redact",
+        Kind::Warn => "warn",
+        Kind::Block => "block",
+    };
+    assert!(
+        audit.contains(&format!("\"action\":\"{action}\"")),
+        "{}: audit missing action {action}:\n{audit}",
+        case.name
+    );
+    let logged = log_lines_containing(case.rule);
+    match case.kind {
+        Kind::Redact => {}
+        Kind::Warn => {
+            assert!(
+                logged.contains("forwarded a match unchanged"),
+                "{}: missing warn log:\n{logged}",
+                case.name
+            );
+            assert!(!logged.contains(case.marker), "{}:\n{logged}", case.name);
+        }
+        Kind::Block => {
+            assert!(
+                logged.contains("blocked request"),
+                "{}: missing block log:\n{logged}",
+                case.name
+            );
+            assert!(!logged.contains(case.marker), "{}:\n{logged}", case.name);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+async fn check_endpoint(
+    case: &Case<'_>,
+    client: &reqwest::Client,
+    proxy: &str,
+    path: &str,
+    body: &str,
+    hits: &Arc<Mutex<Vec<Recorded>>>,
+    placeholder: Option<&str>,
+) {
+    let anthropic = path == "/v1/messages";
+    let response = client
+        .post(format!("{proxy}{path}"))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer test-token")
+        .header("x-api-key", "sk-ant-test")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap_or_else(|err| panic!("{} {path}: {err}", case.name));
+    let status = response.status();
+    let retry = response
+        .headers()
+        .get("x-should-retry")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let text = response.text().await.unwrap();
+    match case.kind {
+        Kind::Block => {
+            assert_eq!(status, 400, "{} {path}: {text}", case.name);
+            assert_eq!(retry.as_deref(), Some("false"), "{} {path}", case.name);
+            assert!(
+                !text.contains(case.marker),
+                "{} {path}: error body contains the matched value:\n{text}",
+                case.name
+            );
+            assert!(hits.lock().unwrap().is_empty(), "{} {path}", case.name);
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let message = if anthropic {
+                assert_eq!(value["type"].as_str(), Some("error"), "{text}");
+                assert_eq!(
+                    value["error"]["type"].as_str(),
+                    Some("invalid_request_error"),
+                    "{text}"
+                );
+                assert_eq!(
+                    value["message"].as_str(),
+                    value["error"]["message"].as_str(),
+                    "{text}"
+                );
+                value["error"]["message"].as_str().unwrap().to_string()
+            } else {
+                assert_eq!(
+                    value["error"]["type"].as_str(),
+                    Some("invalid_request_error"),
+                    "{text}"
+                );
+                assert_eq!(
+                    value["error"]["code"].as_str(),
+                    Some("symveil_blocked"),
+                    "{text}"
+                );
+                assert!(value["error"]["param"].is_null(), "{text}");
+                value["error"]["message"].as_str().unwrap().to_string()
+            };
+            assert!(
+                message.contains(case.rule),
+                "{} {path}: {message}",
+                case.name
+            );
+            assert!(message.contains("SymVeil blocked"), "{message}");
+            assert!(!message.contains(case.marker), "{message}");
+        }
+        Kind::Warn => {
+            assert_eq!(status, 200, "{} {path}: {text}", case.name);
+            let seen = hits.lock().unwrap();
+            assert_eq!(seen.len(), 1, "{} {path}", case.name);
+            assert_eq!(seen[0].path, path);
+            let forwarded = String::from_utf8_lossy(&seen[0].body);
+            assert!(
+                forwarded.contains(case.marker),
+                "{} {path}: upstream did not receive the original:\n{forwarded}",
+                case.name
+            );
+        }
+        Kind::Redact => {
+            assert_eq!(status, 200, "{} {path}: {text}", case.name);
+            let placeholder = placeholder.unwrap();
+            assert!(
+                text.contains(case.marker),
+                "{} {path}: client response was not restored:\n{text}",
+                case.name
+            );
+            assert!(!text.contains(placeholder), "{text}");
+            let seen = hits.lock().unwrap();
+            assert_eq!(seen.len(), 1, "{} {path}", case.name);
+            assert_eq!(seen[0].path, path);
+            let forwarded = String::from_utf8_lossy(&seen[0].body);
+            assert!(
+                !forwarded.contains(case.marker),
+                "{} {path}: upstream saw the value:\n{forwarded}",
+                case.name
+            );
+            assert!(
+                forwarded.contains(placeholder),
+                "{} {path}: upstream missing placeholder:\n{forwarded}",
+                case.name
+            );
+        }
+    }
+}
+
+fn placeholder_for(redact: &RedactSection, text: &str, marker: &str) -> String {
+    let mut engine = build_engine(Vault::ephemeral(), redact).unwrap();
+    let (redacted, hits) = engine.redact_str(text).unwrap();
+    assert!(!redacted.contains(marker), "{redacted}");
+    hits.into_iter()
+        .find(|hit| hit.original.contains(marker))
+        .unwrap()
+        .placeholder
+}
+
+fn install_logs() -> Arc<Mutex<Vec<String>>> {
+    static LOGS: OnceLock<Arc<Mutex<Vec<String>>>> = OnceLock::new();
+    LOGS.get_or_init(|| {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = LogCapture {
+            lines: Arc::clone(&lines),
+        };
+        tracing::subscriber::set_global_default(subscriber).expect("install log capture");
+        lines
+    })
+    .clone()
+}
+
+fn log_lines_containing(rule: &str) -> String {
+    install_logs()
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|line| line.contains(rule))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+struct LogCapture {
+    lines: Arc<Mutex<Vec<String>>>,
+}
+
+impl tracing::Subscriber for LogCapture {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() <= tracing::Level::WARN && metadata.target().contains("symveil")
+    }
+
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut visitor = LineVisitor::default();
+        event.record(&mut visitor);
+        self.lines.lock().unwrap().push(format!(
+            "{} {}{}",
+            event.metadata().target(),
+            event.metadata().name(),
+            visitor.text
+        ));
+    }
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+#[derive(Default)]
+struct LineVisitor {
+    text: String,
+}
+
+impl tracing::field::Visit for LineVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        let _ = write!(self.text, " {}={value:?}", field.name());
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        let _ = write!(self.text, " {}={value}", field.name());
+    }
+}
+
+fn temp_dir(label: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "symveil-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 const PII_PROMPT: &str = "\
 Reach ada@example.com or +46 70 000 00 00 about 20990101-9993 and 990161-9990. \
 Keep ssh user@host, git@github.com:acme/widgets.git, date 2024-11-10, version 1.2.3, \
@@ -379,104 +1056,4 @@ fn content_of(body: &[u8]) -> String {
         .as_str()
         .unwrap()
         .to_string()
-}
-
-async fn spawn_mock(body: Vec<u8>, sse: bool) -> (String, Arc<Mutex<Vec<Recorded>>>) {
-    let hits = Arc::new(Mutex::new(Vec::new()));
-    let state = MockState {
-        hits: Arc::clone(&hits),
-        sse,
-        body: Arc::new(body),
-    };
-    let app = Router::new().fallback(any(mock_handler)).with_state(state);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (format!("http://{addr}"), hits)
-}
-
-async fn mock_handler(State(state): State<MockState>, req: Request<Body>) -> Response {
-    let path = req.uri().path().to_string();
-    let headers = req.headers().clone();
-    let body = axum::body::to_bytes(req.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    state.hits.lock().unwrap().push(Recorded {
-        path,
-        body: body.to_vec(),
-        authorization: header_string(&headers, "authorization"),
-        api_key: header_string(&headers, "x-api-key"),
-        accept_encoding: header_string(&headers, "accept-encoding"),
-    });
-    if state.sse {
-        let payload = (*state.body).clone();
-        let chunks = stream_chunks(payload, 1);
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/event-stream")
-            .body(Body::from_stream(chunks))
-            .unwrap()
-    } else {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "application/json")
-            .body(Body::from((*state.body).clone()))
-            .unwrap()
-    }
-}
-
-fn stream_chunks(
-    data: Vec<u8>,
-    size: usize,
-) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send {
-    async_stream::stream! {
-        let mut index = 0;
-        while index < data.len() {
-            let end = (index + size).min(data.len());
-            yield Ok(Bytes::copy_from_slice(&data[index..end]));
-            index = end;
-        }
-    }
-}
-
-fn header_string(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string)
-}
-
-async fn spawn_proxy(state: AppState) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        symveil::proxy::serve(listener, state).await.unwrap();
-    });
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .unwrap();
-    let url = format!("http://{addr}");
-    for _ in 0..50 {
-        if client.get(format!("{url}/health")).send().await.is_ok() {
-            return url;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("proxy did not start");
-}
-
-fn temp_dir(label: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "symveil-{label}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }

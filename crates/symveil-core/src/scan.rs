@@ -7,6 +7,11 @@ use crate::category::Category;
 use crate::masker::{Boundary, Candidate, Masker, PRI_PATTERN};
 use crate::secrets::SecretHit;
 
+pub const IPV4_RULE: &str = "ipv4";
+pub const IPV6_RULE: &str = "ipv6";
+pub const HOSTNAME_RULE: &str = "internal-hostname";
+pub const NETWORK_RULES: &[&str] = &[IPV4_RULE, IPV6_RULE, HOSTNAME_RULE];
+
 /// Live detection of addresses and internal hostnames. This is part of the
 /// free proxy: it does not use the identifier index.
 pub struct NetworkMasker {
@@ -65,13 +70,13 @@ static IPV4: LazyLock<Regex> = LazyLock::new(|| Regex::new(IPV4_PATTERN).expect(
 static IPV6: LazyLock<Regex> = LazyLock::new(|| Regex::new(IPV6_PATTERN).expect("ipv6 regex"));
 
 pub fn ipv4_hits(text: &str) -> Vec<SecretHit> {
-    bounded_hits(text, &IPV4, "ipv4", ip_boundary_ok, |value| {
+    bounded_hits(text, &IPV4, IPV4_RULE, ip_boundary_ok, |value| {
         !matches!(value, "0.0.0.0" | "127.0.0.1" | "255.255.255.255")
     })
 }
 
 pub fn ipv6_hits(text: &str) -> Vec<SecretHit> {
-    bounded_hits(text, &IPV6, "ipv6", ipv6_edge_ok, is_redactable_ipv6)
+    bounded_hits(text, &IPV6, IPV6_RULE, ipv6_edge_ok, is_redactable_ipv6)
 }
 
 fn is_redactable_ipv6(value: &str) -> bool {
@@ -112,7 +117,7 @@ pub fn hostname_hits(text: &str, regex: &Regex) -> Vec<SecretHit> {
         hits.push(SecretHit {
             start: matched.start(),
             end: matched.end(),
-            rule: "internal-hostname".to_string(),
+            rule: HOSTNAME_RULE.to_string(),
         });
     }
     hits
@@ -159,7 +164,9 @@ pub(crate) fn ip_boundary_ok(text: &str, start: usize, end: usize) -> bool {
 }
 
 fn ipv6_edge_ok(text: &str, start: usize, end: usize) -> bool {
-    let bad = |c: char| c.is_ascii_hexdigit() || c == ':';
+    // Any identifier character, not only a hex digit. `d::e` inside `std::env`
+    // is a valid address, and the letters around it are part of the path.
+    let bad = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == ':';
     !edge_is(text, start, true, bad) && !edge_is(text, end, false, bad)
 }
 
@@ -180,7 +187,7 @@ fn edge_is(text: &str, at: usize, before: bool, bad: impl Fn(char) -> bool) -> b
 
 #[cfg(test)]
 mod tests {
-    use super::ipv4_hits;
+    use super::{ipv4_hits, ipv6_hits};
 
     fn spans(text: &str) -> Vec<&str> {
         ipv4_hits(text)
@@ -194,6 +201,23 @@ mod tests {
         assert_eq!(spans("at 10.8.8.8."), vec!["10.8.8.8"]);
         assert_eq!(spans("at 10.8.8.8, next"), vec!["10.8.8.8"]);
         assert_eq!(spans("at 10.8.8.8"), vec!["10.8.8.8"]);
+    }
+
+    fn ipv6_spans(text: &str) -> Vec<&str> {
+        ipv6_hits(text)
+            .iter()
+            .map(|hit| &text[hit.start..hit.end])
+            .collect()
+    }
+
+    #[test]
+    fn rust_paths_are_not_ipv6_addresses() {
+        assert!(ipv6_spans("std::env::var").is_empty());
+        assert!(ipv6_spans("std::fs::read").is_empty());
+        assert!(ipv6_spans("std::io::Error").is_empty());
+        assert_eq!(ipv6_spans("see 2001:db8::1."), vec!["2001:db8::1"]);
+        assert_eq!(ipv6_spans("ping fe80::1 now"), vec!["fe80::1"]);
+        assert!(ipv6_spans("keep ::1").is_empty());
     }
 
     #[test]
