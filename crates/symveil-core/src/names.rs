@@ -238,12 +238,28 @@ fn match_term(
         pos += 1;
     }
     let after_letters = char_end(chars, pos - 1);
-    let suffix = suffix_bytes(&text[after_letters..]);
-    let end = after_letters + suffix;
+    let end = trailing_separator(text, after_letters + suffix_bytes(&text[after_letters..]));
     if !end_boundary(text, end) {
         return None;
     }
     Some(end)
+}
+
+/// `exempla_` is the whole token. A separator followed by more letters, as in
+/// `tundrahorn_fan_init`, stays outside the match.
+fn trailing_separator(text: &str, end: usize) -> usize {
+    let Some(ch) = text[end..].chars().next() else {
+        return end;
+    };
+    if !is_separator(ch) {
+        return end;
+    }
+    let next = end + ch.len_utf8();
+    if end_boundary(text, next) {
+        next
+    } else {
+        end
+    }
 }
 
 fn char_end(chars: &[(usize, char)], index: usize) -> usize {
@@ -418,6 +434,16 @@ mod tests {
             assert!(!out.contains(sample), "{sample} -> {out}");
             assert!(out.contains("@@sv:"), "{sample} -> {out}");
         }
+        let underscore = masked(names.clone(), "exempla_");
+        assert!(
+            !underscore.contains('_'),
+            "trailing underscore leaked: {underscore}"
+        );
+        let longer = masked(names, "tundrahorn_fan_init");
+        assert!(
+            longer.contains("_fan_init"),
+            "a following identifier was swallowed: {longer}"
+        );
     }
 
     #[test]

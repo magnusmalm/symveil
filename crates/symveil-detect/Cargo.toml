@@ -1,0 +1,14 @@
+[package]
+name = "symveil-detect"
+version = "0.1.0"
+edition = "2021"
+description = "Offline secret-shape detection shared by the SymVeil proxy and learn"
+publish = false
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

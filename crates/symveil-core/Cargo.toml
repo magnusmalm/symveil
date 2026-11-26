@@ -19,6 +19,7 @@ regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+symveil-detect = { path = "../symveil-detect" }
 sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
 toml = "0.8"

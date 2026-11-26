@@ -2031,6 +2031,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "symveil-core",
+ "symveil-learn",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2053,10 +2054,33 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "symveil-detect",
  "tokio",
  "toml",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "symveil-detect"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "regex",
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "symveil-learn"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "regex",
+ "serde",
+ "serde_json",
+ "symveil-detect",
 ]
 
 [[package]]

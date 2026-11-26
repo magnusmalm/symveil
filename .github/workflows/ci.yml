@@ -16,6 +16,14 @@ jobs:
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: learn crate has no network dependencies
+        run: |
+          set -eu
+          cargo tree -p symveil-learn --prefix none --edges normal,build > /tmp/symveil-learn-tree.txt
+          if grep -E '^(reqwest|hyper|hyper-util|ureq|tokio|axum|h2|mio|socket2|native-tls|rustls|tokio-rustls|tungstenite)( |$)' /tmp/symveil-learn-tree.txt; then
+            echo "symveil-learn pulled a network crate" >&2
+            exit 1
+          fi
       - name: test
         run: cargo test --workspace --locked -- --skip leak_measurement
       # Fails while a gated canary still reaches the mock. The Markdown

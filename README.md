@@ -36,7 +36,7 @@ Assignment and URL-password values shorter than 8 characters, all-numeric assign
 
 It also masks IPv4 and IPv6 addresses (keeping `127.0.0.1`, `0.0.0.0`, `255.255.255.255`, and `::1`) and hostnames under the configured internal domains, including a label that contains `_`. An address has to stand on its own, so a Rust path such as `std::env` is left alone. Add your own secret rules under `[[redact.secrets]]`. The name has to be one you choose: a name that matches a builtin detector is rejected at startup.
 
-`[redact.names]` masks a list of terms, person names, and project-code regexes. A term is matched case-insensitively, with `-`, `_`, or `.` between letters, and with a Swedish genitive `-s` or a common suffix (`-en`, `-et`, `-ar`, `-or`, `-er`, and the definite plurals). `Exempla` matches `EXEMPLA`, `exempla_`, `Exem-pla`, and `Exemplas`. It does not match `exempel`. A term needs at least three letters or digits, so `TDH` matches `TDH_FAN_MAX` and does not match inside an unrelated word. A regex such as `TDH-\d+` is used as written. `people = ["Ren Testdotter"]` matches `Ren Testdotter`, `REN TESTDOTTER`, `Testdotter, Ren`, and each of those tokens on a word boundary (`Hello Ren.`). It does not match `render`, `rental`, or `parent`. A person token shorter than three letters or digits is rejected. The placeholder restores to the exact matched text. Usernames and whole paths are not a separate rule: a path is masked only where a configured term or person token appears. The `deny` list and `patterns` list are still the identifier plugin's inputs and do nothing in this build.
+`[redact.names]` masks a list of terms, person names, and project-code regexes. A term is matched case-insensitively, with `-`, `_`, or `.` between letters, and with a Swedish genitive `-s` or a common suffix (`-en`, `-et`, `-ar`, `-or`, `-er`, and the definite plurals). `Exempla` matches `EXEMPLA`, `exempla_` (including the underscore), `Exem-pla`, and `Exemplas`. A trailing `-`, `_`, or `.` is part of the match when it ends the token, and stays in place when more letters follow (`tundrahorn_fan_init`). It does not match `exempel`. A term needs at least three letters or digits, so `TDH` matches `TDH_FAN_MAX` and does not match inside an unrelated word. A regex such as `TDH-\d+` is used as written. `people = ["Ren Testdotter"]` matches `Ren Testdotter`, `REN TESTDOTTER`, `Testdotter, Ren`, and each of those tokens on a word boundary (`Hello Ren.`). It does not match `render`, `rental`, or `parent`. A person token shorter than three letters or digits is rejected. The placeholder restores to the exact matched text. Usernames and whole paths are not a separate rule: a path is masked only where a configured term or person token appears. The `deny` list and `patterns` list are still the identifier plugin's inputs and do nothing in this build.
 
 Each rule has an action. `redact` is the default: the proxy replaces the match and restores it in the response. `warn` forwards the original, writes an audit entry, and logs a warning. `block` returns HTTP 400 and does not call upstream. A config that omits `action` keeps the `redact` behavior.
 
@@ -231,13 +231,52 @@ Personal data stays off until `[redact.pii]` sets `email`, `phone`, or `personnu
 
 `.symveil/` is gitignored. The vault is the reverse map, including secrets and, when those rules are on, personal-data values. SymVeil encrypts it with AES-256-GCM. The key is stored in the OS keychain (macOS Keychain, Linux Secret Service, or Windows Credential Manager), under the service name `symveil` and an account named from a random id in the vault header, so moving the file does not lose the key. A vault whose account was still a hash of the path is migrated the next time it is opened at that path. An existing `.symveil/vault.key` is moved into that keychain on open and then removed. When no keychain can be opened, SymVeil falls back to `.symveil/vault.key` (mode `0600`; the directory is `0700` when SymVeil creates it) and prints a warning that a copy of the directory can decrypt the vault. A locked keychain is not that fallback: startup fails and leaves the vault unchanged. The audit log does not contain secret values or personal-data values. It is mode `0600` and is not encrypted. Encryption does not hide the vault from a process running as the same user, or from root. Do not copy `.symveil/` off the machine. Details: [docs/design/vault-at-rest.md](docs/design/vault-at-rest.md).
 
+## Learning lists
+
+`symveil learn <path>` scans a local directory and helps you write `[redact.names]`, extra secret and symbol rules, and allow entries. The directory is often a checkout on a VPN mount or a LAN share. To the command it is only a filesystem path.
+
+The command does not call a model and does not open a network connection. It does not read `[proxy]` (`openai_base`, `anthropic_base`, `listen`) and it does not use those values. If the process environment has an LLM base URL or an HTTP proxy (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `GROK_XAI_API_BASE_URL`, `GROK_MODELS_BASE_URL`, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `SOCKS_PROXY`, and the `SYMVEIL_*` endpoint variables listed in the error), the command exits before it scans. Unset them for that process. It still will not connect if they are set; it refuses so a shell that is pointed at an upstream is not the process that builds the list.
+
+The scan is read-only. It does not create or edit files in the tree. Symlinks are not followed. `--follow-symlinks` still will not open a link that resolves outside the root. `.git`, build directories, binaries, and files over `--max-bytes` (default 1 MiB) are skipped. `.gitignore` is applied unless you pass `--no-gitignore`.
+
+It asks for company, product, project, and people names first. Those are stored as redact decisions and also used to surface identifiers that contain them. A triage screen then lists counts: secrets, matches of the names you typed, hosts/emails/ips, names, and other identifiers. Each prompt has a one-line legend: `[r]edact  [k]eep  [s]kip  [a]ll-in-group  [?]help  [q]uit+save`. `?` explains what each choice writes into `learned.toml`. A group is decided together; `[d]rill` opens one candidate. `[v]` shows low-signal candidates that are hidden by default (seen once, or a code word). Secrets, emails, IPs, and hosts stay listed. The header is `Secrets 3/12 · overall 15/248 decided · 33 hidden low-signal`. Quit prints what will be written, then saves. A later run hides candidates you already decided. Skip does not count as a decision.
+
+Secret values are masked in the terminal, inside the source line (`const KEY: &str = "AKIA…MPLE"; (len 20)`), with the category, length, an entropy hint, and `file:line`. Names, hosts, and other non-secrets are shown in full. `--reveal` prints secret values. `--report` prints the masked summary and does not prompt or write a file. Both modes are offline.
+
+A learned literal is wrapped in `\b` only on a side that is a word boundary in the source. A password glued to `-p` is not wrapped on that side, because `\b` would never match. Product codes such as `TDH-4471` and `FAN-ALPHA-2` are stored as prefix-and-tail patterns. A prefix of three letters or fewer (`TDH`, `FAN`) is not stored as a term, because a case-insensitive term with suffixes also matches `fan.git` and `TDH_API_KEY`. The full identifier (`TDH_FAN_MAX`, `tundrahorn_fan_init`) is stored as a literal instead. An internal hostname may contain underscores (`db_backup.fan_line.internal`). A line with a space is separate company or product terms, so `Exempla Tundrahorn` files both words and matches `Exemplas`, `Exem-pla`, and `tundrahorn_fan`. `person Ren Testdotter` stores a person. Two capitalised words of four letters or more are terms even if they were marked as a person. Common words, header words (`Author`, `Date`, `Subject`), and weekday or month tokens stay hidden until `[v]`. `[a]` on the other-identifiers group skips them and remembers the skip; `a redact` is the explicit choice. A skip writes no rule, and the next run does not ask again. Phone numbers, Swedish personnummer, and IPv6 are not listed: the proxy's built-in detectors cover them, and phone and personnummer apply only when `[redact.pii]` is on. The scan summary names skipped extensions and directories (`.pdf`, `.png`, `dist/`). `--include-skipped` reads printable runs from those files, except `.git`, and drops a host whose labels are not a legal hostname. Quit lists secrets that were shown and not decided. A rule that does not match its own source line is not written.
+
+The default output is `$XDG_CONFIG_HOME/symveil/learned.toml`, or `~/.config/symveil/learned.toml`. `--out` chooses another path, which must not be inside the scanned tree. The file is mode `0600`. It holds the strings you marked, including secrets, because the proxy has to match them and a later run has to know what you decided. Do not commit it.
+
+On startup the proxy merges that file when `[redact] learned` points at it, or `SYMVEIL_LEARNED` is set, or the default path exists. Names and people append to `[redact.names]`. Secret and symbol rows append to `[[redact.secrets]]`. Keep rows append to `redact.allow`. Allow entries are exact. A builtin secret is still masked if you kept it: allow does not exempt secrets. An email is still masked when `[redact.pii] email` is on. A missing default file is not an error. A path you set that is missing is an error.
+
+This is a mechanical pass over tokens, string literals, the builtin secret detectors (including base64), high-entropy tokens, addresses, hosts, and repeated capitalised words in comments. Common keywords are dropped. It will miss names you did not type and secrets that do not look like the builtin shapes. It will also flag words that are not sensitive. A clean report does not mean a later request is safe to send. The proxy only sees clients that use it. Learn does not sandbox anything.
+
+```bash
+symveil learn /path/to/tree
+symveil learn /path/to/tree --report
+symveil learn /path/to/tree --out "$HOME/.config/symveil/learned.toml"
+```
+
+The synthetic tree for a manual trial is `make leak-corpus`, which writes `target/leak-corpus` and leaves it there. `make leak-test` also writes `target/leak-report/corpus`, and the next measurement deletes that directory. There is no `corpus-a` directory.
+
+```bash
+make leak-corpus
+./target/release/symveil learn target/leak-corpus --report
+```
+
+Point the proxy at a non-default file with `learned = "learned.toml"` under `[redact]` (path relative to the repository root).
+
 ## Development
 
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+make leak-test
+make leak-streak
 ```
+
+`make leak-test` prints `NOT SAFE` and then `gated leaks: 0` on a passing run. NOT SAFE is the work-use verdict (no real-client pass). The makefile `leak-streak` line `SAFE` means three runs exited 0, which means zero gated leaks. The report verdict stays NOT SAFE. Details: [tests/leak/RUNBOOK.md](tests/leak/RUNBOOK.md).
 
 ## License
 
