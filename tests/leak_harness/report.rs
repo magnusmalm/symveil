@@ -83,6 +83,21 @@ pub struct Run {
 }
 
 impl Run {
+    /// Covered canaries that were not sent, or that showed up on a channel this build claims.
+    pub fn gated_leak_ids(&self) -> Vec<String> {
+        self.items
+            .iter()
+            .filter(|row| row.expect == "masked")
+            .filter(|row| {
+                !row.sent
+                    || !row.proxy_leak_sessions.is_empty()
+                    || row.cli_text_leak
+                    || row.cli_json_gate
+            })
+            .map(|row| row.id.clone())
+            .collect()
+    }
+
     pub fn write(&self, dir: &Path) -> Result<()> {
         let json_path = dir.join("report.json");
         let md_path = dir.join("report.md");
@@ -95,6 +110,7 @@ impl Run {
         json!({
             "about": self.about,
             "verdict": self.verdict,
+            "gated_leaks": self.gated_leak_ids(),
             "reasons": self.reasons,
             "build": {
                 "tier": if self.identifiers { "pro-feature" } else { "free" },
@@ -153,6 +169,17 @@ impl Run {
         let _ = writeln!(out, "{}", self.about);
         let _ = writeln!(out);
         let _ = writeln!(out, "**Verdict: {}**", self.verdict);
+        let _ = writeln!(out);
+        let gated = self.gated_leak_ids();
+        let _ = writeln!(out, "Gated leaks this run: {}.", gated.len());
+        if gated.is_empty() {
+            let _ = writeln!(
+                out,
+                "Covered canaries did not reach the mock. NOT SAFE is the work-use bar: three clean runs and a real-client pass. This harness does not run that pass, so the verdict stays NOT SAFE when gated leaks are 0."
+            );
+        } else {
+            let _ = writeln!(out, "Ids: {}.", gated.join(", "));
+        }
         let _ = writeln!(out);
         let _ = writeln!(out, "Reasons:");
         for reason in &self.reasons {

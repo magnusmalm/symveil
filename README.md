@@ -255,6 +255,13 @@ symveil learn /path/to/tree --report
 symveil learn /path/to/tree --out "$HOME/.config/symveil/learned.toml"
 ```
 
+The synthetic tree for a manual trial is `make leak-corpus`, which writes `target/leak-corpus` and leaves it there. `make leak-test` also writes `target/leak-report/corpus`, and the next measurement deletes that directory. There is no `corpus-a` directory.
+
+```bash
+make leak-corpus
+./target/release/symveil learn target/leak-corpus --report
+```
+
 Point the proxy at a non-default file with `learned = "learned.toml"` under `[redact]` (path relative to the repository root).
 
 ## Development
@@ -263,7 +270,11 @@ Point the proxy at a non-default file with `learned = "learned.toml"` under `[re
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+make leak-test
+make leak-streak
 ```
+
+`make leak-test` prints `NOT SAFE` and then `gated leaks: 0` on a passing run. NOT SAFE is the work-use verdict (no real-client pass). The makefile `leak-streak` line `SAFE` means three runs exited 0, which means zero gated leaks. The report verdict stays NOT SAFE. Details: [tests/leak/RUNBOOK.md](tests/leak/RUNBOOK.md).
 
 ## License
 
