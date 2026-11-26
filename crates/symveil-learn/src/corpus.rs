@@ -31,10 +31,10 @@ const TEXT_SET: usize = 64;
 const PLANTED_SET: usize = 73;
 
 // Measured triage on this corpus. A partial that becomes full still passes.
-// 54/58 useful is 93%. A keep hit is a precision failure, so the ceiling is 0.
-const TEXT_FULL_FLOOR: usize = 52;
+// 54/58 useful is 93%. Keep hits and benign hits are precision failures.
+const TEXT_FULL_FLOOR: usize = 53;
 const TEXT_COVERED_FLOOR: usize = 53;
-const PLANTED_FULL_FLOOR: usize = 55;
+const PLANTED_FULL_FLOOR: usize = 56;
 const PLANTED_COVERED_FLOOR: usize = 60;
 const USEFUL_FLOOR: usize = 54;
 const PRECISION_PERCENT_FLOOR: usize = 93;
@@ -197,6 +197,11 @@ fn corpus_rules_match_their_source_and_leave_benign_words() {
         cover_value(&learned, "db_backup.fan_line.internal"),
         Hit::Full,
         "underscore host was not learned in full"
+    );
+    assert_eq!(
+        cover_value(&learned, "exempla_"),
+        Hit::Full,
+        "exempla_ was only partially covered"
     );
     assert_eq!(
         cover_value(&learned, "TDH-4471"),
@@ -576,12 +581,28 @@ fn match_term(
         pos += 1;
     }
     let after = char_end(chars, pos - 1);
-    let suffix = suffix_bytes(&text[after..]);
-    let end = after + suffix;
+    let end = trailing_separator(text, after + suffix_bytes(&text[after..]));
     if !end_boundary(text, end) {
         return None;
     }
     Some(end)
+}
+
+/// `exempla_` is the whole token. A separator followed by more letters stays
+/// outside the match.
+fn trailing_separator(text: &str, end: usize) -> usize {
+    let Some(ch) = text[end..].chars().next() else {
+        return end;
+    };
+    if !is_separator(ch) {
+        return end;
+    }
+    let next = end + ch.len_utf8();
+    if end_boundary(text, next) {
+        next
+    } else {
+        end
+    }
 }
 
 fn char_end(chars: &[(usize, char)], index: usize) -> usize {

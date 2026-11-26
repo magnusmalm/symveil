@@ -403,8 +403,9 @@ fn redundant(decision: &Decision, terms: &[String], emails: &[String]) -> bool {
         if product_code_regex(&decision.text).is_some() {
             return false;
         }
-        // A suffix (`Exemplas`, `exempla_`) is already covered. A longer
-        // identifier (`tundrahorn_fan_init`) is not: the tail would stay visible.
+        // A suffix (`Exemplas`) or a trailing separator (`exempla_`) is already
+        // covered. A longer identifier (`tundrahorn_fan_init`) is not: the tail
+        // would stay visible.
         if terms
             .iter()
             .any(|term| same_or_suffix(&decision.text, term))
