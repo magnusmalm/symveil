@@ -317,11 +317,17 @@ fn text_from_bytes(bytes: &[u8]) -> Option<String> {
     }
 }
 
+const MIN_PRINTABLE_RUN: usize = 6;
+
+/// Printable ASCII runs only. NUL, controls, and non-ASCII end a run, so a
+/// filename is not glued through padding onto the next field unless those
+/// bytes are themselves printable. Callers still reject hostname labels that
+/// are not legal.
 fn text_runs(bytes: &[u8]) -> String {
     let mut out = String::new();
     let mut run = Vec::new();
     for &byte in bytes {
-        if byte == b'\t' || byte == b'\n' || (0x20..=0x7e).contains(&byte) {
+        if (0x20..=0x7e).contains(&byte) {
             run.push(byte);
         } else {
             flush_run(&mut run, &mut out);
@@ -332,7 +338,7 @@ fn text_runs(bytes: &[u8]) -> String {
 }
 
 fn flush_run(run: &mut Vec<u8>, out: &mut String) {
-    if run.len() >= 6 {
+    if run.len() >= MIN_PRINTABLE_RUN {
         if !out.is_empty() {
             out.push('\n');
         }
@@ -620,6 +626,9 @@ mod tests {
         assert!(joined.contains("pdf.author@exempla.test"), "{joined}");
         assert!(joined.contains("png.author@exempla.test"), "{joined}");
         assert!(joined.contains("artifacts.tdh.corp"), "{joined}");
+        assert!(!joined
+            .chars()
+            .any(|ch| ch == '\0' || (ch.is_control() && ch != '\n')));
         let _ = fs::remove_dir_all(&root);
     }
 }

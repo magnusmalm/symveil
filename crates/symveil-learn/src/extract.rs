@@ -7,7 +7,7 @@ use regex::Regex;
 use symveil_detect::secrets::{high_entropy_hits, scan_secrets};
 
 use crate::model::{key_for, Candidate, LearnCategory};
-use crate::stoplist::{is_common, is_stopped};
+use crate::stoplist::{is_calendar, is_common, is_stopped};
 use crate::walk::WalkedFile;
 
 static IDENT: LazyLock<Regex> =
@@ -73,12 +73,80 @@ pub fn extract(files: &[WalkedFile]) -> Vec<Candidate> {
             merge(&mut acc, file, hit);
         }
     }
+    add_product_prefix_hits(files, &mut acc);
     let mut candidates: Vec<Candidate> = acc
         .into_iter()
         .filter_map(|(key, item)| finish(key, item))
         .collect();
+    drop_company_people(&mut candidates);
     sort_candidates(&mut candidates);
     candidates
+}
+
+/// `TDH-4471` and `TDH_FAN_MAX` share a prefix. File that prefix as a name term
+/// so the macro is covered with the same separator rules as other terms.
+fn add_product_prefix_hits(files: &[WalkedFile], acc: &mut HashMap<String, Acc>) {
+    let mut prefixes = Vec::new();
+    for item in acc.values() {
+        if item.rule.as_deref() != Some("product-code") {
+            continue;
+        }
+        let Some(prefix) = item.text.split('-').next() else {
+            continue;
+        };
+        let len = prefix.chars().count();
+        if (3..=8).contains(&len)
+            && prefix.bytes().all(|byte| byte.is_ascii_uppercase())
+            && !prefixes.iter().any(|existing: &String| existing == prefix)
+        {
+            prefixes.push(prefix.to_string());
+        }
+    }
+    for file in files {
+        for prefix in &prefixes {
+            let marker = format!("{prefix}_");
+            let Some(pos) = file.text.find(&marker) else {
+                continue;
+            };
+            merge(
+                acc,
+                file,
+                RawHit {
+                    start: pos,
+                    end: pos + prefix.len(),
+                    text: prefix.clone(),
+                    category: LearnCategory::Name,
+                    rule: Some("product-prefix".to_string()),
+                    in_comment: false,
+                },
+            );
+        }
+    }
+}
+
+/// A capitalised pair whose words already stand alone is a company or product
+/// phrase (`Exempla Tundrahorn`), not a person. People stay for a short first
+/// name such as `Ren Testdotter`.
+fn drop_company_people(candidates: &mut Vec<Candidate>) {
+    let names: std::collections::HashSet<String> = candidates
+        .iter()
+        .filter(|candidate| candidate.category == LearnCategory::Name)
+        .map(|candidate| candidate.text.to_lowercase())
+        .collect();
+    candidates.retain(|candidate| {
+        if candidate.category != LearnCategory::Person {
+            return true;
+        }
+        let words: Vec<String> = candidate
+            .text
+            .split_whitespace()
+            .map(|word| word.to_lowercase())
+            .collect();
+        if words.iter().any(|word| is_calendar(word)) {
+            return false;
+        }
+        !(words.len() >= 2 && words.iter().all(|word| names.contains(word)))
+    });
 }
 
 /// Pull identifiers that contain a term the user typed, including ones the
@@ -448,6 +516,9 @@ fn skip_host(host: &str) -> bool {
     if is_ipv4(&lower) {
         return matches!(lower.as_str(), "0.0.0.0" | "127.0.0.1" | "255.255.255.255");
     }
+    if !hostname_labels_valid(&lower) {
+        return true;
+    }
     let tld = lower.rsplit('.').next().unwrap_or("");
     if SOURCE_EXT.contains(&tld) {
         return true;
@@ -483,6 +554,39 @@ const CODE_TLDS: &[&str] = &[
     "replace", "self", "setattr", "split", "str", "strip", "this", "true", "type", "unwrap",
     "update", "upper", "values", "write",
 ];
+
+/// Letters, digits, and hyphens only. A label glued out of a filename
+/// (`txtfl`, `txtpk`) is not a hostname.
+pub(crate) fn hostname_labels_valid(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+    let labels: Vec<&str> = host.split('.').filter(|label| !label.is_empty()).collect();
+    labels.len() >= 2 && labels.iter().copied().all(hostname_label_valid)
+}
+
+fn hostname_label_valid(label: &str) -> bool {
+    let bytes = label.as_bytes();
+    if bytes.is_empty() || bytes.len() > 63 {
+        return false;
+    }
+    if !bytes[0].is_ascii_alphanumeric() || !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
+        return false;
+    }
+    if !bytes
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+    {
+        return false;
+    }
+    const GLUED_EXT: &[&str] = &["txt", "pdf", "png", "zip"];
+    !GLUED_EXT.iter().any(|ext| {
+        label.len() > ext.len()
+            && label.starts_with(ext)
+            && label.as_bytes()[ext.len()].is_ascii_alphanumeric()
+    })
+}
 
 fn is_ipv4(value: &str) -> bool {
     let mut parts = value.split('.');
@@ -588,10 +692,15 @@ fn push_people(
             || is_common(last.as_str())
             || is_stopped(first.as_str())
             || is_stopped(last.as_str())
+            || is_calendar(first.as_str())
+            || is_calendar(last.as_str())
         {
             continue;
         }
         if first.as_str().chars().count() < 3 || last.as_str().chars().count() < 3 {
+            continue;
+        }
+        if date_context(text, whole.start()) {
             continue;
         }
         hits.push(raw(
@@ -603,6 +712,12 @@ fn push_people(
             in_ranges(comments, whole.start(), whole.end()),
         ));
     }
+}
+
+fn date_context(text: &str, start: usize) -> bool {
+    let (line_start, line_end) = line_bounds(text, start);
+    let line = text[line_start..line_end].trim_start().to_ascii_lowercase();
+    line.starts_with("date:") || line.starts_with("datum:")
 }
 
 fn pem_line(text: &str, start: usize) -> bool {
@@ -728,15 +843,8 @@ fn push_strings(
         }
         let in_comment = in_ranges(comments, start, end);
         if words.len() >= 2 && words.iter().all(|word| looks_like_name(word)) {
-            let trim_start = text[start..end].find(value).unwrap_or(0);
-            hits.push(raw(
-                text,
-                start + trim_start,
-                start + trim_start + value.len(),
-                LearnCategory::Name,
-                None,
-                in_comment,
-            ));
+            // The words are collected on their own. One concatenated term would
+            // not match `Exemplas` or `tundrahorn_fan`.
             continue;
         }
         if words.len() == 1 && ident_ok(value) && !is_hex_token(value) {
@@ -764,7 +872,10 @@ fn push_capitalised(
             continue;
         }
         let word = matched.as_str();
-        if is_stopped(word) || word.chars().count() < 4 {
+        if is_stopped(word) || is_calendar(word) || word.chars().count() < 4 {
+            continue;
+        }
+        if date_context(text, matched.start()) {
             continue;
         }
         hits.push(raw(
@@ -1242,5 +1353,64 @@ fn return_value() {}
             candidate.category == LearnCategory::Secret
                 && candidate.text.contains("OPENSSH PRIVATE KEY")
         }));
+    }
+
+    #[test]
+    fn company_phrase_and_date_line_are_not_people() {
+        let found = only(
+            "company Exempla, product Tundrahorn.\nLABEL x=\"Exempla Tundrahorn\"\nDate:   Thu Jan 1 00:00:00 2099 +0000\nAuthor: Ren Testdotter <fan.operator@exempla.test>\n#define TDH_FAN_MAX 2400\ncode TDH-4471\n",
+        );
+        assert!(
+            found
+                .iter()
+                .all(|candidate| candidate.text != "Exempla Tundrahorn"),
+            "{found:?}"
+        );
+        assert!(
+            found.iter().all(|candidate| candidate.text != "Thu Jan"),
+            "{found:?}"
+        );
+        assert!(
+            found
+                .iter()
+                .all(|candidate| candidate.text != "Thu" && candidate.text != "Jan"),
+            "{found:?}"
+        );
+        assert!(
+            has(&found, LearnCategory::Person, "Ren Testdotter"),
+            "{found:?}"
+        );
+        assert!(has(&found, LearnCategory::Name, "Exempla"), "{found:?}");
+        assert!(has(&found, LearnCategory::Name, "Tundrahorn"), "{found:?}");
+        assert!(
+            found.iter().any(|candidate| {
+                candidate.text == "TDH" && candidate.rule.as_deref() == Some("product-prefix")
+            }),
+            "{found:?}"
+        );
+        let author = found.iter().find(|candidate| candidate.text == "Author");
+        assert!(
+            author.is_none_or(crate::session::is_low_signal),
+            "Author should stay low-signal: {found:?}"
+        );
+    }
+
+    #[test]
+    fn glued_filename_bytes_are_not_a_host() {
+        let found = only("README.txtfl\u{0}README.txtPK\u{3}see artifacts.tdh.corp later\n");
+        assert!(
+            found
+                .iter()
+                .all(|candidate| !candidate.text.to_ascii_lowercase().contains("readme.txt")),
+            "{found:?}"
+        );
+        assert!(
+            has(&found, LearnCategory::Host, "artifacts.tdh.corp"),
+            "{found:?}"
+        );
+        assert!(found
+            .iter()
+            .filter(|candidate| candidate.category == LearnCategory::Host)
+            .all(|candidate| hostname_labels_valid(&candidate.text)));
     }
 }

@@ -19,6 +19,13 @@ pub fn is_common(word: &str) -> bool {
     COMMON.iter().any(|item| *item == lower)
 }
 
+/// English and Swedish weekday and month names, including the short forms
+/// that show up on a `Date:` line (`Thu`, `Jan`, `mån`, `okt`).
+pub fn is_calendar(word: &str) -> bool {
+    let lower = word.to_lowercase();
+    CALENDAR.iter().any(|item| *item == lower)
+}
+
 const WORDS: &[&str] = &[
     "abstract",
     "alias",
@@ -671,10 +678,12 @@ const COMMON: &[&str] = &[
     "api",
     "arbete",
     "assertion",
+    "author",
     "aws",
     "cell",
     "company",
     "compile",
+    "date",
     "define",
     "echo",
     "environ",
@@ -704,6 +713,7 @@ const COMMON: &[&str] = &[
     "skola",
     "slack",
     "stripe",
+    "subject",
     "threshold",
     "traceback",
     "träd",
@@ -713,9 +723,70 @@ const COMMON: &[&str] = &[
     "workflow",
 ];
 
+const CALENDAR: &[&str] = &[
+    "mon",
+    "tue",
+    "wed",
+    "thu",
+    "fri",
+    "sat",
+    "sun",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+    "jan",
+    "feb",
+    "mar",
+    "apr",
+    "may",
+    "jun",
+    "jul",
+    "aug",
+    "sep",
+    "oct",
+    "nov",
+    "dec",
+    "january",
+    "february",
+    "march",
+    "april",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+    "mån",
+    "tis",
+    "ons",
+    "tor",
+    "fre",
+    "lör",
+    "sön",
+    "måndag",
+    "tisdag",
+    "onsdag",
+    "torsdag",
+    "fredag",
+    "lördag",
+    "söndag",
+    "maj",
+    "januari",
+    "februari",
+    "mars",
+    "juni",
+    "augusti",
+    "oktober",
+];
+
 #[cfg(test)]
 mod tests {
-    use super::{is_common, is_stopped};
+    use super::{is_calendar, is_common, is_stopped};
 
     #[test]
     fn keywords_and_ordinary_code_words_are_stopped() {
@@ -735,5 +806,14 @@ mod tests {
         assert!(is_common("fläkt"));
         assert!(is_common("threshold"));
         assert!(is_common("FAKE"));
+        assert!(is_common("Author"));
+        assert!(is_common("Date"));
+        assert!(is_common("Subject"));
+        assert!(is_calendar("Thu"));
+        assert!(is_calendar("Jan"));
+        assert!(is_calendar("måndag"));
+        assert!(is_calendar("oktober"));
+        assert!(!is_calendar("Exempla"));
+        assert!(!is_calendar("Testdotter"));
     }
 }

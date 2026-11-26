@@ -86,6 +86,8 @@ impl fmt::Display for LearnCategory {
 pub enum DecisionAction {
     Redact,
     Keep,
+    /// Remembered so a later run does not ask again. Writes no rule and no allow entry.
+    Skip,
 }
 
 impl DecisionAction {
@@ -93,6 +95,7 @@ impl DecisionAction {
         match self {
             Self::Redact => "redact",
             Self::Keep => "keep",
+            Self::Skip => "skip",
         }
     }
 
@@ -100,6 +103,7 @@ impl DecisionAction {
         match name {
             "redact" => Some(Self::Redact),
             "keep" => Some(Self::Keep),
+            "skip" => Some(Self::Skip),
             _ => None,
         }
     }

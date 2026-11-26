@@ -151,11 +151,11 @@ pub fn review(
     }
     writeln!(
         stdout,
-        "Type company, product, project, and people names. One per line. A line with a space is a person."
+        "Type company, product, and project names. One per line. A line with a space is separate terms (Exempla Tundrahorn files both words)."
     )?;
     writeln!(
         stdout,
-        "[enter] add this name  [blank] start triage  [?]help  [q]uit+save"
+        "person Ren Testdotter marks a person. [enter] add  [blank] start triage  [?]help  [q]uit+save"
     )?;
     loop {
         write!(stdout, "name> ")?;
@@ -173,16 +173,18 @@ pub fn review(
                 return Ok(decisions);
             }
             Some(line) => match classify_typed(line.trim()) {
-                Ok((category, text)) => {
-                    let decision = Decision::new(DecisionAction::Redact, category, text);
-                    writeln!(
-                        stdout,
-                        "added {} as {}",
-                        decision.text,
-                        decision.category.as_str()
-                    )?;
-                    decisions.retain(|existing| existing.key != decision.key);
-                    decisions.push(decision);
+                Ok(items) => {
+                    for (category, text) in items {
+                        let decision = Decision::new(DecisionAction::Redact, category, text);
+                        writeln!(
+                            stdout,
+                            "added {} as {}",
+                            decision.text,
+                            decision.category.as_str()
+                        )?;
+                        decisions.retain(|existing| existing.key != decision.key);
+                        decisions.push(decision);
+                    }
                 }
                 Err(message) => writeln!(stdout, "{message}")?,
             },
@@ -294,16 +296,6 @@ pub fn review(
             )? {
                 Apply::Stay => {}
                 Apply::Triage => phase = Phase::Triage,
-                Apply::Next => {
-                    if let Phase::Drill { bucket, index } = &mut phase {
-                        *index += 1;
-                        let items =
-                            visible(&pending_of(candidates, &decisions), *bucket, show_hidden);
-                        if *index >= items.len() {
-                            phase = Phase::Triage;
-                        }
-                    }
-                }
                 Apply::Consumed => {
                     if let Phase::Drill { bucket, index } = &phase {
                         let items =
@@ -322,9 +314,7 @@ pub fn review(
 enum Apply {
     Stay,
     Triage,
-    /// Skip: the candidate stays pending, so the cursor moves on.
-    Next,
-    /// Redact or keep: the candidate leaves the list, so the same index is the next one.
+    /// The candidate leaves the list, so the same index is the next one.
     Consumed,
 }
 
@@ -371,9 +361,12 @@ fn apply_group(
 ) -> Result<Apply> {
     match command {
         Command::AllRedact(None) if bucket == Bucket::Other => {
+            for item in items {
+                record(decisions, item, DecisionAction::Skip, item.category);
+            }
             writeln!(
                 stdout,
-                "`a` skips {} in other. That group is mostly code words. Type `a redact` to redact the ones shown.",
+                "`a` skips {} in other (remembered, no rule). Type `a redact` to redact the ones shown.",
                 items.len()
             )?;
             Ok(Apply::Triage)
@@ -394,7 +387,14 @@ fn apply_group(
             Ok(Apply::Triage)
         }
         Command::Skip | Command::AllSkip => {
-            writeln!(stdout, "skip {} in this group (not written)", items.len())?;
+            for item in items {
+                record(decisions, item, DecisionAction::Skip, item.category);
+            }
+            writeln!(
+                stdout,
+                "skip {} in this group (remembered, no rule)",
+                items.len()
+            )?;
             Ok(Apply::Triage)
         }
         Command::Help
@@ -427,8 +427,9 @@ fn apply_one(
             Ok(Apply::Consumed)
         }
         Command::Skip => {
-            writeln!(stdout, "skip (not written)")?;
-            Ok(Apply::Next)
+            record(decisions, item, DecisionAction::Skip, item.category);
+            writeln!(stdout, "skip (remembered, no rule)")?;
+            Ok(Apply::Consumed)
         }
         Command::AllRedact(category) => {
             for item in &items[index..] {
@@ -446,9 +447,12 @@ fn apply_one(
             Ok(Apply::Triage)
         }
         Command::AllSkip => {
+            for item in &items[index..] {
+                record(decisions, item, DecisionAction::Skip, item.category);
+            }
             writeln!(
                 stdout,
-                "skip {} from here (not written)",
+                "skip {} from here (remembered, no rule)",
                 items.len() - index
             )?;
             Ok(Apply::Triage)
@@ -577,11 +581,11 @@ fn write_help(stdout: &mut dyn Write) -> Result<()> {
     )?;
     writeln!(
         stdout,
-        "s / skip               decide later. Skip is not written. The next run shows it again."
+        "s / skip               remember the choice and write no rule. The next run does not ask again."
     )?;
     writeln!(
         stdout,
-        "a / all-in-group       on secrets, related names, addresses, and names, `a` redacts the shown rows. On other identifiers, `a` skips them; `a redact` redacts those shown. `a keep` allows, `a skip` leaves them. Hidden low-signal rows are not included."
+        "a / all-in-group       on secrets, related names, addresses, and names, `a` redacts the shown rows. On other identifiers, `a` skips them and remembers that; `a redact` redacts those shown. `a keep` allows, `a skip` remembers a skip. Hidden low-signal rows are not included."
     )?;
     writeln!(
         stdout,
@@ -648,9 +652,11 @@ fn write_save_summary(
     let mut hosts = 0usize;
     let mut other = 0usize;
     let mut keeps = 0usize;
+    let mut skips = 0usize;
     for decision in decisions {
         match (decision.action, decision.category) {
             (DecisionAction::Keep, _) => keeps += 1,
+            (DecisionAction::Skip, _) => skips += 1,
             (DecisionAction::Redact, LearnCategory::Name) => names.push(decision.text.as_str()),
             (DecisionAction::Redact, LearnCategory::Person) => people.push(decision.text.as_str()),
             (DecisionAction::Redact, LearnCategory::Secret) => secrets += 1,
@@ -684,7 +690,7 @@ fn write_save_summary(
     writeln!(stdout, "  keep (allow list): {keeps}")?;
     writeln!(
         stdout,
-        "skip is not written. A keep does not stop a builtin secret rule."
+        "  skip: {skips} (remembered, no rule). A keep does not stop a builtin secret rule."
     )?;
     Ok(())
 }
@@ -761,7 +767,10 @@ pub(crate) fn is_low_signal(candidate: &Candidate) -> bool {
     if candidate.related || candidate.category == LearnCategory::Secret {
         return false;
     }
-    if candidate.rule.as_deref() == Some("product-code") {
+    if matches!(
+        candidate.rule.as_deref(),
+        Some("product-code") | Some("product-prefix")
+    ) {
         return false;
     }
     if candidate.category == LearnCategory::Person && candidate.text.contains(char::is_whitespace) {
@@ -943,27 +952,39 @@ fn is_quit(line: &str) -> bool {
     matches!(line.trim().to_ascii_lowercase().as_str(), "q" | "quit")
 }
 
-fn classify_typed(line: &str) -> std::result::Result<(LearnCategory, String), String> {
+fn classify_typed(line: &str) -> std::result::Result<Vec<(LearnCategory, String)>, String> {
     let text = line.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.is_empty() {
         return Err("empty name".to_string());
     }
-    let tokens: Vec<&str> = text.split(' ').collect();
-    if tokens.len() == 1 {
-        if alnum_len(tokens[0]) < 3 {
-            return Err(format!("`{text}` needs at least 3 letters or digits"));
-        }
-        Ok((LearnCategory::Name, text))
+    let (as_person, body) = if let Some(rest) = text.strip_prefix("person ") {
+        (true, rest.trim())
+    } else if let Some(rest) = text.strip_prefix("person:") {
+        (true, rest.trim())
     } else {
-        for token in &tokens {
-            if alnum_len(token) < 3 {
-                return Err(format!(
-                    "`{text}` has a token shorter than 3 letters or digits"
-                ));
-            }
-        }
-        Ok((LearnCategory::Person, text))
+        (false, text.as_str())
+    };
+    if body.is_empty() {
+        return Err("empty name".to_string());
     }
+    let tokens: Vec<&str> = body.split_whitespace().collect();
+    for token in &tokens {
+        if alnum_len(token) < 3 {
+            return Err(format!(
+                "`{body}` has a token shorter than 3 letters or digits"
+            ));
+        }
+    }
+    if as_person {
+        if tokens.len() < 2 {
+            return Err(format!("`{body}` needs a first and last name after person"));
+        }
+        return Ok(vec![(LearnCategory::Person, tokens.join(" "))]);
+    }
+    Ok(tokens
+        .into_iter()
+        .map(|token| (LearnCategory::Name, token.to_string()))
+        .collect())
 }
 
 fn alnum_len(token: &str) -> usize {
@@ -1040,7 +1061,7 @@ let ip = \"10.9.8.7\";
         let script = "\
 ?
 Exempla
-Ren Testdotter
+person Ren Testdotter
 
 1
 a
@@ -1097,7 +1118,9 @@ q
             "{rendered}"
         );
         assert!(decisions.iter().any(|decision| {
-            decision.text == "Exempla" && decision.action == DecisionAction::Redact
+            decision.text == "Exempla"
+                && decision.category == LearnCategory::Name
+                && decision.action == DecisionAction::Redact
         }));
         assert!(decisions
             .iter()
@@ -1111,9 +1134,9 @@ q
         assert!(decisions.iter().any(|decision| {
             decision.action == DecisionAction::Keep && decision.text.contains("tundrahorn.internal")
         }));
-        assert!(decisions
-            .iter()
-            .all(|decision| decision.text != "zephyr_marker"));
+        assert!(decisions.iter().any(|decision| {
+            decision.text == "zephyr_marker" && decision.action == DecisionAction::Skip
+        }));
 
         let decided: HashSet<String> = decisions
             .iter()
@@ -1132,9 +1155,39 @@ q
         );
         assert!(pending.iter().all(|key| key != "term:exempla"));
         assert!(
-            pending.iter().any(|key| key.contains("zephyr_marker")),
-            "skipped symbol should remain pending: {pending:?}"
+            pending.iter().all(|key| !key.contains("zephyr_marker")),
+            "skipped symbol was asked again: {pending:?}"
         );
+    }
+
+    #[test]
+    fn a_spaced_company_line_is_terms_not_a_person() {
+        let walked = walked("company Exempla, product Tundrahorn.\n");
+        let mut candidates = extract::extract(&walked.files);
+        let mut input = Cursor::new("Exempla Tundrahorn\n\nq\n");
+        let mut output = Vec::new();
+        let decisions = review(
+            false,
+            &walked,
+            &mut candidates,
+            Vec::new(),
+            &mut input,
+            &mut output,
+        )
+        .unwrap();
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.contains("added Exempla as name"), "{rendered}");
+        assert!(rendered.contains("added Tundrahorn as name"), "{rendered}");
+        assert!(!rendered.contains("as person"), "{rendered}");
+        assert!(decisions.iter().any(|decision| {
+            decision.text == "Exempla" && decision.category == LearnCategory::Name
+        }));
+        assert!(decisions.iter().any(|decision| {
+            decision.text == "Tundrahorn" && decision.category == LearnCategory::Name
+        }));
+        assert!(decisions
+            .iter()
+            .all(|decision| decision.category != LearnCategory::Person));
     }
 
     #[test]

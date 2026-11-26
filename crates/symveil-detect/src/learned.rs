@@ -113,9 +113,10 @@ impl LearnedFile {
             }
         }
         for decision in &file.decisions {
-            if decision.action != "redact" && decision.action != "keep" {
+            if decision.action != "redact" && decision.action != "keep" && decision.action != "skip"
+            {
                 bail!(
-                    "learned decision `{}` has action `{}`; expected \"redact\" or \"keep\"",
+                    "learned decision `{}` has action `{}`; expected \"redact\", \"keep\", or \"skip\"",
                     decision.key,
                     decision.action
                 );

@@ -102,7 +102,7 @@ fn interactive_stdin_writes_a_private_file_the_proxy_loads() {
         .stdin
         .take()
         .unwrap()
-        .write_all(b"Exempla\nRen Testdotter\n\nquit\n")
+        .write_all(b"Exempla\nperson Ren Testdotter\n\nquit\n")
         .unwrap();
     let output = child.wait_with_output().unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();

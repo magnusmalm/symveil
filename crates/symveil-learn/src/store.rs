@@ -63,9 +63,13 @@ fn synthesize(file: &LearnedFile) -> Vec<Decision> {
 }
 
 pub fn file_from_decisions(decisions: &[Decision]) -> Result<LearnedFile> {
+    let mut expanded = decisions.to_vec();
+    refile_org_phrases(&mut expanded);
+    expand_spaced_names(&mut expanded);
+    add_person_term_tokens(&mut expanded);
     let mut by_key: HashMap<String, Decision> = HashMap::new();
-    for decision in decisions {
-        by_key.insert(decision.key.clone(), decision.clone());
+    for decision in expanded {
+        by_key.insert(decision.key.clone(), decision);
     }
     let mut ordered: Vec<Decision> = by_key.into_values().collect();
     ordered.sort_by(|left, right| left.key.cmp(&right.key).then(left.text.cmp(&right.text)));
@@ -85,6 +89,7 @@ pub fn file_from_decisions(decisions: &[Decision]) -> Result<LearnedFile> {
         });
         match decision.action {
             DecisionAction::Keep => push_unique(&mut allow, &decision.text),
+            DecisionAction::Skip => {}
             DecisionAction::Redact => match filed_category(decision) {
                 LearnCategory::Name => {
                     check_term(&decision.text)?;
@@ -117,6 +122,89 @@ pub fn file_from_decisions(decisions: &[Decision]) -> Result<LearnedFile> {
         allow: LearnedAllow { entries: allow },
         decisions: records,
     })
+}
+
+/// `Exempla Tundrahorn` is a company and a product, not a person. Each word
+/// becomes a term so `Exemplas`, `Exem-pla`, and `tundrahorn_fan` match.
+fn refile_org_phrases(decisions: &mut Vec<Decision>) {
+    let mut extra = Vec::new();
+    decisions.retain(|decision| {
+        if decision.action != DecisionAction::Redact
+            || decision.category != LearnCategory::Person
+            || !is_org_phrase(&decision.text)
+        {
+            return true;
+        }
+        for word in decision.text.split_whitespace() {
+            extra.push(named_term(decision, word));
+        }
+        false
+    });
+    decisions.extend(extra);
+}
+
+/// A person token of at least four letters is also a term, so `Testdotter`
+/// takes the same suffix and separator rules as a company name. `Ren` stays
+/// only on the person entry.
+fn add_person_term_tokens(decisions: &mut Vec<Decision>) {
+    let mut extra = Vec::new();
+    for decision in decisions.iter() {
+        if decision.action != DecisionAction::Redact
+            || decision.category != LearnCategory::Person
+            || looks_like_credential(&decision.text)
+        {
+            continue;
+        }
+        for token in decision.text.split_whitespace() {
+            if token.chars().filter(|ch| ch.is_alphanumeric()).count() >= 4 {
+                extra.push(named_term(decision, token));
+            }
+        }
+    }
+    decisions.extend(extra);
+}
+
+fn expand_spaced_names(decisions: &mut Vec<Decision>) {
+    let mut extra = Vec::new();
+    decisions.retain(|decision| {
+        if decision.action != DecisionAction::Redact || decision.category != LearnCategory::Name {
+            return true;
+        }
+        let words: Vec<&str> = decision.text.split_whitespace().collect();
+        if words.len() < 2 {
+            return true;
+        }
+        for word in words {
+            extra.push(named_term(decision, word));
+        }
+        false
+    });
+    decisions.extend(extra);
+}
+
+fn named_term(decision: &Decision, word: &str) -> Decision {
+    let mut one = Decision::new(DecisionAction::Redact, LearnCategory::Name, word);
+    one.sources = decision.sources.clone();
+    one.left_glued = decision.left_glued;
+    one.right_glued = decision.right_glued;
+    one
+}
+
+/// Two or more capitalised words of at least four letters. `Ren Testdotter`
+/// stays a person because the first name is shorter.
+fn is_org_phrase(text: &str) -> bool {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    words.len() >= 2
+        && words.iter().all(|word| {
+            let mut chars = word.chars();
+            let Some(first) = chars.next() else {
+                return false;
+            };
+            first.is_uppercase()
+                && chars.all(|ch| !ch.is_uppercase())
+                && word.chars().count() >= 4
+                && !crate::stoplist::is_calendar(word)
+        })
 }
 
 fn filed_category(decision: &Decision) -> LearnCategory {
@@ -172,7 +260,7 @@ pub fn matching_regex(
             return Ok(pattern);
         }
     }
-    let escaped = regex::escape(text);
+    let escaped = escape_literal(text);
     let wordish = !text.is_empty()
         && text
             .chars()
@@ -241,6 +329,15 @@ fn is_regex_word(ch: char) -> bool {
     ch == '_' || ch.is_alphanumeric()
 }
 
+/// `regex::escape` leaves raw newlines in the pattern. Spell controls as
+/// escapes so a learned rule stays printable and still matches the source.
+fn escape_literal(text: &str) -> String {
+    regex::escape(text)
+        .replace('\n', r"\n")
+        .replace('\r', r"\r")
+        .replace('\t', r"\t")
+}
+
 static CODE_NUM: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^([A-Z]{2,8})-(\d{2,8})$").expect("numeric product code"));
 static CODE_WORD: LazyLock<Regex> = LazyLock::new(|| {
@@ -270,15 +367,6 @@ fn collapse_redundant(decisions: &mut Vec<Decision>) {
         })
         .map(|decision| decision.text.clone())
         .collect();
-    let people: Vec<String> = decisions
-        .iter()
-        .filter(|decision| {
-            decision.action == DecisionAction::Redact
-                && decision.category == LearnCategory::Person
-                && !looks_like_credential(&decision.text)
-        })
-        .map(|decision| decision.text.clone())
-        .collect();
     let emails: Vec<String> = decisions
         .iter()
         .filter(|decision| {
@@ -287,11 +375,11 @@ fn collapse_redundant(decisions: &mut Vec<Decision>) {
         .map(|decision| decision.text.to_lowercase())
         .collect();
     decisions.retain(|decision| {
-        decision.action != DecisionAction::Redact || !redundant(decision, &terms, &people, &emails)
+        decision.action != DecisionAction::Redact || !redundant(decision, &terms, &emails)
     });
 }
 
-fn redundant(decision: &Decision, terms: &[String], people: &[String], emails: &[String]) -> bool {
+fn redundant(decision: &Decision, terms: &[String], emails: &[String]) -> bool {
     if decision.category == LearnCategory::Name {
         if terms
             .iter()
@@ -305,13 +393,6 @@ fn redundant(decision: &Decision, terms: &[String], people: &[String], emails: &
                 .iter()
                 .all(|word| terms.iter().any(|term| letters(term) == letters(word)))
         {
-            return true;
-        }
-        if people.iter().any(|person| {
-            person
-                .split_whitespace()
-                .any(|token| letters(token) == letters(&decision.text))
-        }) {
             return true;
         }
     }
@@ -528,7 +609,10 @@ mod tests {
         assert!(!text.contains("[proxy]"));
         assert!(!text.contains("openai_base"));
         let parsed = LearnedFile::parse(&text).unwrap();
-        assert_eq!(parsed.names.terms, vec!["Exempla".to_string()]);
+        assert_eq!(
+            parsed.names.terms,
+            vec!["Exempla".to_string(), "Testdotter".to_string()]
+        );
         assert_eq!(parsed.names.people, vec!["Ren Testdotter".to_string()]);
         assert_eq!(parsed.allow.entries, vec!["threshold".to_string()]);
         assert!(parsed
@@ -681,5 +765,43 @@ mod tests {
             .secrets
             .iter()
             .all(|rule| !rule.regex.contains("exempla.test") || rule.regex.contains('@')));
+    }
+
+    #[test]
+    fn a_company_phrase_becomes_terms_and_a_skip_writes_no_rule() {
+        let decisions = vec![
+            Decision::new(
+                DecisionAction::Redact,
+                LearnCategory::Person,
+                "Exempla Tundrahorn",
+            ),
+            Decision::new(
+                DecisionAction::Redact,
+                LearnCategory::Person,
+                "Ren Testdotter",
+            ),
+            Decision::new(DecisionAction::Skip, LearnCategory::Symbol, "zephyr_marker"),
+        ];
+        let file = file_from_decisions(&decisions).unwrap();
+        assert_eq!(file.names.people, vec!["Ren Testdotter".to_string()]);
+        assert!(file.names.terms.iter().any(|term| term == "Exempla"));
+        assert!(file.names.terms.iter().any(|term| term == "Tundrahorn"));
+        assert!(file.names.terms.iter().any(|term| term == "Testdotter"));
+        assert!(file.symbols.is_empty(), "{:?}", file.symbols);
+        assert!(file.secrets.is_empty(), "{:?}", file.secrets);
+        assert!(file
+            .decisions
+            .iter()
+            .any(|decision| decision.action == "skip" && decision.text == "zephyr_marker"));
+        assert!(file
+            .decisions
+            .iter()
+            .all(|decision| decision.text != "Exempla Tundrahorn"));
+        let parsed = LearnedFile::parse(&file.to_toml().unwrap()).unwrap();
+        assert_eq!(parsed.names.people, file.names.people);
+        assert!(parsed
+            .decisions
+            .iter()
+            .any(|decision| decision.action == "skip"));
     }
 }
