@@ -231,6 +231,32 @@ Personal data stays off until `[redact.pii]` sets `email`, `phone`, or `personnu
 
 `.symveil/` is gitignored. The vault is the reverse map, including secrets and, when those rules are on, personal-data values. SymVeil encrypts it with AES-256-GCM. The key is stored in the OS keychain (macOS Keychain, Linux Secret Service, or Windows Credential Manager), under the service name `symveil` and an account named from a random id in the vault header, so moving the file does not lose the key. A vault whose account was still a hash of the path is migrated the next time it is opened at that path. An existing `.symveil/vault.key` is moved into that keychain on open and then removed. When no keychain can be opened, SymVeil falls back to `.symveil/vault.key` (mode `0600`; the directory is `0700` when SymVeil creates it) and prints a warning that a copy of the directory can decrypt the vault. A locked keychain is not that fallback: startup fails and leaves the vault unchanged. The audit log does not contain secret values or personal-data values. It is mode `0600` and is not encrypted. Encryption does not hide the vault from a process running as the same user, or from root. Do not copy `.symveil/` off the machine. Details: [docs/design/vault-at-rest.md](docs/design/vault-at-rest.md).
 
+## Learning lists
+
+`symveil learn <path>` scans a local directory and helps you write `[redact.names]`, extra secret and symbol rules, and allow entries. The directory is often a checkout on a VPN mount or a LAN share. To the command it is only a filesystem path.
+
+The command does not call a model and does not open a network connection. It does not read `[proxy]` (`openai_base`, `anthropic_base`, `listen`) and it does not use those values. If the process environment has an LLM base URL or an HTTP proxy (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `GROK_XAI_API_BASE_URL`, `GROK_MODELS_BASE_URL`, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `SOCKS_PROXY`, and the `SYMVEIL_*` endpoint variables listed in the error), the command exits before it scans. Unset them for that process. It still will not connect if they are set; it refuses so a shell that is pointed at an upstream is not the process that builds the list.
+
+The scan is read-only. It does not create or edit files in the tree. Symlinks are not followed. `--follow-symlinks` still will not open a link that resolves outside the root. `.git`, build directories, binaries, and files over `--max-bytes` (default 1 MiB) are skipped. `.gitignore` is applied unless you pass `--no-gitignore`.
+
+It asks for company, product, project, and people names first. Those are stored as redact decisions and also used to surface identifiers that contain them. It then walks ranked groups (secrets, addresses, hosts, names, symbols, and the other categories it guessed). For each item, or the rest of a group, you can redact it as `name`, `person`, `secret`, `symbol`, `host`, `email`, `domain`, or `ip`, keep it (allow list), skip it, or quit and save. A later run hides candidates you already decided. Skip does not count as a decision.
+
+Secret values are masked in the terminal (`AKIA…MPLE len=20`, plus `file:line`). `--reveal` prints them. `--report` prints the same masked summary and does not prompt or write a file. Both modes are offline.
+
+The default output is `$XDG_CONFIG_HOME/symveil/learned.toml`, or `~/.config/symveil/learned.toml`. `--out` chooses another path, which must not be inside the scanned tree. The file is mode `0600`. It holds the strings you marked, including secrets, because the proxy has to match them and a later run has to know what you decided. Do not commit it.
+
+On startup the proxy merges that file when `[redact] learned` points at it, or `SYMVEIL_LEARNED` is set, or the default path exists. Names and people append to `[redact.names]`. Secret and symbol rows append to `[[redact.secrets]]`. Keep rows append to `redact.allow`. Allow entries are exact. A builtin secret is still masked if you kept it: allow does not exempt secrets. An email is still masked when `[redact.pii] email` is on. A missing default file is not an error. A path you set that is missing is an error.
+
+This is a mechanical pass over tokens, string literals, the builtin secret detectors (including base64), high-entropy tokens, addresses, hosts, and repeated capitalised words in comments. Common keywords are dropped. It will miss names you did not type and secrets that do not look like the builtin shapes. It will also flag words that are not sensitive. A clean report does not mean a later request is safe to send. The proxy only sees clients that use it. Learn does not sandbox anything.
+
+```bash
+symveil learn /path/to/tree
+symveil learn /path/to/tree --report
+symveil learn /path/to/tree --out "$HOME/.config/symveil/learned.toml"
+```
+
+Point the proxy at a non-default file with `learned = "learned.toml"` under `[redact]` (path relative to the repository root).
+
 ## Development
 
 ```bash

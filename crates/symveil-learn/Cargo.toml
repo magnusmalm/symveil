@@ -1,0 +1,12 @@
+[package]
+name = "symveil-learn"
+version = "0.1.0"
+edition = "2021"
+description = "Offline local scan that builds SymVeil redaction lists"
+publish = false
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+regex = "1"
+symveil-detect = { path = "../symveil-detect" }

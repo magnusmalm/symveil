@@ -85,3 +85,9 @@ Server-side tools (web search, code interpreter) run at the provider when a real
 ## 4. What counts as a pass
 
 A real-client pass is: the mock (and then the real upstream, if you capture it) shows no gated canary, placeholders restore in the tool output you see locally, and the title-bypass check above is clean. Configured company, project, and person names in `[redact.names]` are masked on this free build. Usernames are not. A path is masked only where a configured term or person token appears. Safe for work use still needs three consecutive clean runs and this real-client pass.
+
+## 5. `symveil learn` is not part of this check
+
+`symveil learn <path>` only reads a local tree and writes `learned.toml`. It does not call a model, does not open a socket, and does not read `[proxy]` to contact an upstream. If `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `HTTP_PROXY`, `HTTPS_PROXY`, or the other endpoint variables named in its error are set, it exits instead of scanning. CI checks that the learn crate's dependency closure does not include HTTP clients (`cargo tree -p symveil-learn`).
+
+The file it writes is a list: names, extra literal rules, and allow entries. The proxy merges it on startup. That list is incomplete whenever the scan did not see a value or you skipped it. A keep does not stop a builtin secret rule, and it does not stop personal-data rules when those are on. Learn does not sandbox the tree. It is not a leak measurement. `make leak-test` and `make leak-streak` do not run it, and a clean learn report is not a SAFE result. Use the synthetic corpus only if you try the command while doing the real-client pass. Do not point it at a proprietary tree for this check.

@@ -6,6 +6,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tokio::net::TcpListener;
 
+use symveil_learn::Options as LearnOptions;
+
 use symveil::audit::AuditLog;
 use symveil::build_engine;
 #[cfg(feature = "identifiers")]
@@ -40,6 +42,12 @@ enum Command {
     Redact(TextArgs),
     /// Restore placeholders on stdin back to the original text.
     Restore(TextArgs),
+    /// Scan a local tree and record names, secrets, and symbols to redact.
+    ///
+    /// Offline and read-only. No model and no network connection. The result
+    /// is a list the proxy can merge. It does not guarantee nothing leaks,
+    /// and it does not sandbox the tree.
+    Learn(LearnArgs),
 }
 
 #[cfg(feature = "identifiers")]
@@ -78,6 +86,31 @@ struct ProxyArgs {
 }
 
 #[derive(clap::Args)]
+struct LearnArgs {
+    /// Local directory to scan. A URL is refused.
+    path: PathBuf,
+    /// Where to write learned.toml. Default: the user config directory.
+    /// The path must not be inside the scanned tree.
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// Print a masked candidate summary and do not prompt or write.
+    #[arg(long)]
+    report: bool,
+    /// Print full secret values. Off by default.
+    #[arg(long)]
+    reveal: bool,
+    /// Skip files larger than this many bytes.
+    #[arg(long, default_value_t = symveil_learn::DEFAULT_MAX_BYTES)]
+    max_bytes: u64,
+    /// Do not apply .gitignore rules. .git and build directories are still skipped.
+    #[arg(long)]
+    no_gitignore: bool,
+    /// Follow symlinks that resolve inside the scan root. Links that leave the root are never opened.
+    #[arg(long)]
+    follow_symlinks: bool,
+}
+
+#[derive(clap::Args)]
 struct TextArgs {
     #[arg(long, default_value = ".")]
     repo: PathBuf,
@@ -85,21 +118,44 @@ struct TextArgs {
     config: Option<PathBuf>,
 }
 
-#[tokio::main]
-async fn main() {
-    if let Err(err) = run().await {
+fn main() {
+    let cli = Cli::parse();
+    let result = match cli.cmd {
+        Command::Learn(args) => symveil_learn::run(learn_options(args)),
+        other => {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            runtime.block_on(run_network(other))
+        }
+    };
+    if let Err(err) = result {
         eprintln!("symveil: {err:#}");
         std::process::exit(1);
     }
 }
 
-async fn run() -> Result<()> {
-    match Cli::parse().cmd {
+fn learn_options(args: LearnArgs) -> LearnOptions {
+    LearnOptions {
+        root: args.path,
+        out: args.out,
+        report: args.report,
+        reveal: args.reveal,
+        max_bytes: args.max_bytes,
+        gitignore: !args.no_gitignore,
+        follow_symlinks: args.follow_symlinks,
+    }
+}
+
+async fn run_network(cmd: Command) -> Result<()> {
+    match cmd {
         #[cfg(feature = "identifiers")]
         Command::Index(args) => cmd_index(args),
         Command::Proxy(args) => cmd_proxy(args).await,
         Command::Redact(args) => cmd_text(args, true),
         Command::Restore(args) => cmd_text(args, false),
+        Command::Learn(_) => anyhow::bail!("learn is not a networked command"),
     }
 }
 

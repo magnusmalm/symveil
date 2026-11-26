@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/symveil-core"]
+members = [".", "crates/symveil-core", "crates/symveil-detect", "crates/symveil-learn"]
 resolver = "2"
 
 [package]
@@ -20,6 +20,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 symveil-core = { path = "crates/symveil-core" }
+symveil-learn = { path = "crates/symveil-learn" }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
