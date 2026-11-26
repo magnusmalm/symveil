@@ -236,6 +236,7 @@ async fn cmd_proxy(args: ProxyArgs) -> Result<()> {
     let entries = vault.len();
     let key_line = vault.key_location_line();
     let mut engine = build_engine(vault, &cfg.redact)?;
+    engine.set_binary_mode(cfg.binary.mode);
     engine.save_if_dirty()?;
 
     let audit_path = resolve_path(&root, &cfg.proxy.audit_log);
@@ -271,6 +272,7 @@ async fn cmd_proxy(args: ProxyArgs) -> Result<()> {
         eprintln!("  masking     secrets");
     }
     eprintln!("  mode        {}", cfg.redact.mode);
+    eprintln!("  binaries    {}", cfg.binary.mode);
     eprintln!(
         "  vault       {entries} entries ({}, encrypted at rest)",
         vault_path.display()
@@ -288,6 +290,7 @@ fn cmd_text(args: TextArgs, redact: bool) -> Result<()> {
     let (root, cfg) = load_context(&args.repo, args.config.as_deref())?;
     let vault = open_vault(&root, &cfg)?;
     let mut engine = build_engine(vault, &cfg.redact)?;
+    engine.set_binary_mode(cfg.binary.mode);
     let mut raw = String::new();
     io::stdin().read_to_string(&mut raw)?;
     if raw.len() > 32 * 1024 * 1024 {
@@ -301,12 +304,16 @@ fn cmd_text(args: TextArgs, redact: bool) -> Result<()> {
             let (text, hits) = engine.redact_str(&raw)?;
             (text.into_bytes(), hits)
         };
+        let notes = engine.take_binary_notes();
         if policy::contains_block(&hits) {
             anyhow::bail!("{}", policy::block_message(&hits));
         }
         engine.save_if_dirty()?;
         io::stdout().write_all(&bytes)?;
         eprintln!("redactions: {}", policy::redact_count(&hits));
+        if !notes.is_empty() {
+            eprintln!("binaries withheld: {}", notes.len());
+        }
         warn_forwarded(&hits);
     } else {
         let (bytes, restored) = engine.restore_bytes(raw.as_bytes(), json);

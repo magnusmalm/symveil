@@ -143,7 +143,7 @@ async fn proxy_request(State(state): State<AppState>, req: Request<Body>) -> Res
     };
     let wants_stream = request_wants_stream(&body);
 
-    let (redacted, hits, map) = {
+    let (redacted, hits, map, binaries) = {
         let mut engine = state.engine.lock().unwrap_or_else(|err| err.into_inner());
         let redacted = match engine.redact_bytes(&body) {
             Ok(pair) => pair,
@@ -153,13 +153,24 @@ async fn proxy_request(State(state): State<AppState>, req: Request<Body>) -> Res
             tracing::warn!("vault save failed: {err}");
         }
         let map = engine.restore_map();
-        (redacted.0, redacted.1, map)
+        let binaries = engine.take_binary_notes();
+        (redacted.0, redacted.1, map, binaries)
     };
 
     if let Ok(mut audit) = state.audit.lock() {
-        if let Err(err) = audit.record_request(&path, &hits) {
+        if let Err(err) = audit.record_request(&path, &hits, &binaries) {
             tracing::warn!("audit log: {err}");
         }
+    }
+
+    if !binaries.is_empty() {
+        let bytes: usize = binaries.iter().map(|note| note.bytes).sum();
+        tracing::warn!(
+            path = %path,
+            count = binaries.len(),
+            bytes,
+            "withheld binary content"
+        );
     }
 
     if redact::contains_block(&hits) {
@@ -228,6 +239,7 @@ async fn proxy_request(State(state): State<AppState>, req: Request<Body>) -> Res
         method = %method,
         path = %path,
         redactions = redaction_count,
+        binaries = binaries.len(),
         streaming,
         status = status.as_u16(),
         "proxied"

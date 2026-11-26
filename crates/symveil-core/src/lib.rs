@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+mod binary;
 mod keystore;
 mod perms;
 mod seal;

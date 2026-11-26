@@ -15,7 +15,7 @@ If you find a way for a secret to reach the upstream model, or for the proxy to 
 - `.symveil/vault.json` is the encrypted reverse map (placeholders and original values). With `[redact.pii]` enabled it also holds those personal-data values, because the reply has to be restored.
 - The AES-256-GCM key lives in the OS keychain. An old `.symveil/vault.key` is copied there on open and the file is removed. Losing the keychain entry makes the vault undecryptable. SymVeil will not replace an undecryptable vault with an empty one.
 - `.symveil/vault.key` is written only when no OS keychain can be opened. Startup warns when that happens. A locked keychain is left locked; the file is not used as a silent spare.
-- `.symveil/audit.jsonl` records category, rule, length, and placeholder. It omits secret text and personal-data text. It is not encrypted. Non-secret categories still store their original string.
+- `.symveil/audit.jsonl` records category, rule, length, and placeholder. It omits secret text and personal-data text. It is not encrypted. Non-secret categories still store their original string. A withheld image, document, or file block adds kind, length, and `"disposition":"withheld"`. The bytes, and any text inside them, are not written.
 - Files SymVeil creates under `.symveil/` are owner-only on Unix (`0700` directory, `0600` files). An existing directory or audit log that is more open is warned about and left as it is.
 - `Authorization`, `x-api-key`, and other client headers are forwarded upstream and are not written to the audit log.
 

@@ -26,6 +26,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 async-stream = "0.3"
+base64 = "0.22"
 axum = "0.7"
 bytes = "1"
 futures = "0.3"

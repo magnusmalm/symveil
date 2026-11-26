@@ -46,7 +46,7 @@ Set the base URL at the proxy and leave the Anthropic SDK path without a `/v1` s
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
 ```
 
-Run Claude Code in the synthetic directory on your subscription. Ask it to read `configs/fan.env`, `firmware/tundrahorn_fan.c`, and `logs/boot.log`.
+Run Claude Code in the synthetic directory on your subscription. Ask it to read `configs/fan.env`, `firmware/tundrahorn_fan.c`, and `logs/boot.log`. Also ask it to read `assets/badge.png` and `docs/manual.pdf`. Those two are sent as image and document blocks, not as text. With the default `[binary]` mode the mock should show a `[symveil: image withheld, N bytes]` note (and the same shape for a document) and should not show the file bytes. `mode = "pass"` forwards that block unchanged.
 
 This repository was not run against Claude Code. Subscription traffic may ignore `ANTHROPIC_BASE_URL` and talk to another host. The mock is how you see that. Only after the mock shows redacted bodies should you restart the proxy with `--anthropic-base https://api.anthropic.com`, still on the synthetic repo, and repeat the same prompts. Do not switch the workspace to real source.
 
