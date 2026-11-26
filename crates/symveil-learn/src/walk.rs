@@ -2,7 +2,7 @@
 //! Symlinks are skipped unless the caller asks to follow them, and a link that
 //! resolves outside the root is never opened.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -41,6 +41,9 @@ pub struct WalkOptions {
     pub max_bytes: u64,
     pub gitignore: bool,
     pub follow_symlinks: bool,
+    /// Read build directories other than `.git`, and pull text out of files
+    /// whose extension is normally skipped (pdf, png, zip, and the rest).
+    pub include_skipped: bool,
 }
 
 #[derive(Debug, Default)]
@@ -51,6 +54,8 @@ pub struct WalkStats {
     pub large: usize,
     pub binary: usize,
     pub unreadable: usize,
+    pub ext_skips: BTreeMap<String, usize>,
+    pub dir_skips: BTreeMap<String, usize>,
 }
 
 #[derive(Debug)]
@@ -144,7 +149,8 @@ fn walk_dir(
             continue;
         }
         if meta.is_dir() {
-            if skip_dir(&name) {
+            if skip_dir(&name, opts.include_skipped) {
+                *walked.stats.dir_skips.entry(name).or_default() += 1;
                 walked.stats.dirs += 1;
                 continue;
             }
@@ -192,7 +198,8 @@ fn follow_link(
         }
     };
     if meta.is_dir() {
-        if skip_dir(name) {
+        if skip_dir(name, opts.include_skipped) {
+            *walked.stats.dir_skips.entry(name.to_string()).or_default() += 1;
             walked.stats.dirs += 1;
             return Ok(());
         }
@@ -225,7 +232,13 @@ fn consider_file(
         walked.stats.large += 1;
         return;
     }
-    if binary_ext(path) {
+    if binary_ext(path) && !opts.include_skipped {
+        let ext = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("bin")
+            .to_ascii_lowercase();
+        *walked.stats.ext_skips.entry(format!(".{ext}")).or_default() += 1;
         walked.stats.binary += 1;
         return;
     }
@@ -237,11 +250,14 @@ fn consider_file(
             return;
         }
     };
-    if bytes.contains(&0) {
-        walked.stats.binary += 1;
-        return;
-    }
-    let Ok(text) = String::from_utf8(bytes) else {
+    let text = if opts.include_skipped {
+        text_from_bytes(&bytes)
+    } else if bytes.contains(&0) {
+        None
+    } else {
+        String::from_utf8(bytes).ok()
+    };
+    let Some(text) = text.filter(|text| !text.is_empty()) else {
         walked.stats.binary += 1;
         return;
     };
@@ -251,8 +267,78 @@ fn consider_file(
     });
 }
 
-fn skip_dir(name: &str) -> bool {
+fn skip_dir(name: &str, include_skipped: bool) -> bool {
+    if name == ".git" {
+        return true;
+    }
+    if include_skipped {
+        return false;
+    }
     SKIP_DIRS.contains(&name)
+}
+
+pub fn skip_summary(stats: &WalkStats) -> String {
+    let mut lines = Vec::new();
+    if !stats.ext_skips.is_empty() {
+        let parts: Vec<String> = stats
+            .ext_skips
+            .iter()
+            .map(|(ext, count)| format!("{ext} {count}"))
+            .collect();
+        lines.push(format!("skipped extensions: {}", parts.join(", ")));
+    }
+    if !stats.dir_skips.is_empty() {
+        let parts: Vec<String> = stats
+            .dir_skips
+            .iter()
+            .map(|(dir, count)| format!("{dir}/ {count}"))
+            .collect();
+        lines.push(format!("skipped dirs: {}", parts.join(", ")));
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    lines.push(
+        "These were not scanned. Pass --include-skipped to read build directories and text inside those files."
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+fn text_from_bytes(bytes: &[u8]) -> Option<String> {
+    if !bytes.contains(&0) {
+        return String::from_utf8(bytes.to_vec()).ok();
+    }
+    let text = text_runs(bytes);
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn text_runs(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    let mut run = Vec::new();
+    for &byte in bytes {
+        if byte == b'\t' || byte == b'\n' || (0x20..=0x7e).contains(&byte) {
+            run.push(byte);
+        } else {
+            flush_run(&mut run, &mut out);
+        }
+    }
+    flush_run(&mut run, &mut out);
+    out
+}
+
+fn flush_run(run: &mut Vec<u8>, out: &mut String) {
+    if run.len() >= 6 {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&String::from_utf8_lossy(run));
+    }
+    run.clear();
 }
 
 fn binary_ext(path: &Path) -> bool {
@@ -436,6 +522,7 @@ mod tests {
                 max_bytes: 16,
                 gitignore: true,
                 follow_symlinks: false,
+                include_skipped: false,
             },
         )
         .unwrap();
@@ -476,6 +563,7 @@ mod tests {
                 max_bytes: 1024,
                 gitignore: false,
                 follow_symlinks: false,
+                include_skipped: false,
             },
         )
         .unwrap();
@@ -485,6 +573,53 @@ mod tests {
             .map(|file| file.text.clone())
             .collect::<String>();
         assert!(joined.contains("visible-when-ignored-off"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn skipped_extensions_and_dirs_are_counted_and_can_be_included() {
+        let root = temp_tree("skipped");
+        fs::create_dir_all(root.join("dist")).unwrap();
+        fs::create_dir_all(root.join("docs")).unwrap();
+        let mut png = b"\x89PNG\r\n".to_vec();
+        png.extend(b"png.author@exempla.test");
+        png.push(0);
+        fs::write(root.join("docs/manual.pdf"), b"\0pdf.author@exempla.test\0").unwrap();
+        fs::write(root.join("badge.png"), png).unwrap();
+        fs::write(root.join("dist/bundle.zip"), b"\0artifacts.tdh.corp\0").unwrap();
+        let skipped = walk(
+            &root,
+            &WalkOptions {
+                max_bytes: 1024 * 1024,
+                gitignore: true,
+                follow_symlinks: false,
+                include_skipped: false,
+            },
+        )
+        .unwrap();
+        assert!(skipped.files.is_empty());
+        let summary = skip_summary(&skipped.stats);
+        assert!(summary.contains(".pdf"), "{summary}");
+        assert!(summary.contains(".png"), "{summary}");
+        assert!(summary.contains("dist/"), "{summary}");
+        let included = walk(
+            &root,
+            &WalkOptions {
+                max_bytes: 1024 * 1024,
+                gitignore: true,
+                follow_symlinks: false,
+                include_skipped: true,
+            },
+        )
+        .unwrap();
+        let joined = included
+            .files
+            .iter()
+            .map(|file| file.text.clone())
+            .collect::<String>();
+        assert!(joined.contains("pdf.author@exempla.test"), "{joined}");
+        assert!(joined.contains("png.author@exempla.test"), "{joined}");
+        assert!(joined.contains("artifacts.tdh.corp"), "{joined}");
         let _ = fs::remove_dir_all(&root);
     }
 }

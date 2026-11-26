@@ -111,6 +111,13 @@ pub struct Decision {
     pub action: DecisionAction,
     pub category: LearnCategory,
     pub text: String,
+    /// Source lines that contain `text`. Empty when the user typed the value.
+    /// Not written to `learned.toml`; used to check the generated regex.
+    pub sources: Vec<String>,
+    /// A word character sits against the value in some source line, so a
+    /// leading or trailing `\b` would miss that line.
+    pub left_glued: bool,
+    pub right_glued: bool,
 }
 
 impl Decision {
@@ -121,6 +128,9 @@ impl Decision {
             action,
             category,
             text,
+            sources: Vec::new(),
+            left_glued: false,
+            right_glued: false,
         }
     }
 
@@ -141,6 +151,9 @@ impl Decision {
             action,
             category,
             text: record.text.clone(),
+            sources: Vec::new(),
+            left_glued: false,
+            right_glued: false,
         })
     }
 }
@@ -173,6 +186,10 @@ pub struct Candidate {
     pub first_line: u32,
     /// Source line of the first hit, so the prompt can show the value in place.
     pub context: String,
+    /// A few source lines, used to check that a generated rule matches.
+    pub sources: Vec<String>,
+    pub left_glued: bool,
+    pub right_glued: bool,
     pub related: bool,
     pub secretish: bool,
 }

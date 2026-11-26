@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use crate::extract;
 use crate::model::{Candidate, Decision, DecisionAction, LearnCategory};
 use crate::preview::{entropy_hint, line_with_value, mask_body, preview};
-use crate::stoplist::is_stopped;
-use crate::walk::Walked;
+use crate::stoplist::{is_common, is_stopped};
+use crate::walk::{skip_summary, Walked};
 
 const LEGEND: &str =
     "[r]edact  [k]eep  [s]kip  [a]ll-in-group  [?]help  [q]uit+save  [d]rill  [b]ack  [v] hidden";
@@ -142,6 +142,10 @@ pub fn review(
         stats.large,
         stats.binary
     )?;
+    let skips = skip_summary(stats);
+    if !skips.is_empty() {
+        writeln!(stdout, "{skips}")?;
+    }
     for warning in &walked.warnings {
         writeln!(stdout, "warning: {warning}")?;
     }
@@ -159,13 +163,13 @@ pub fn review(
         match read_line(stdin)? {
             None => {
                 writeln!(stdout, "end of input, saving")?;
-                write_save_summary(&decisions, stdout)?;
+                write_save_summary(&decisions, candidates, stdout)?;
                 return Ok(decisions);
             }
             Some(line) if line.trim().is_empty() => break,
             Some(line) if is_help(&line) => write_help(stdout)?,
             Some(line) if is_quit(&line) => {
-                write_save_summary(&decisions, stdout)?;
+                write_save_summary(&decisions, candidates, stdout)?;
                 return Ok(decisions);
             }
             Some(line) => match classify_typed(line.trim()) {
@@ -246,7 +250,7 @@ pub fn review(
         stdout.flush().context("flush prompt")?;
         let Some(line) = read_line(stdin)? else {
             writeln!(stdout, "end of input, saving")?;
-            write_save_summary(&decisions, stdout)?;
+            write_save_summary(&decisions, candidates, stdout)?;
             return Ok(decisions);
         };
         if line.trim().is_empty() {
@@ -255,7 +259,7 @@ pub fn review(
         match parse_command(&line) {
             Ok(Command::Help) => write_help(stdout)?,
             Ok(Command::Quit) => {
-                write_save_summary(&decisions, stdout)?;
+                write_save_summary(&decisions, candidates, stdout)?;
                 return Ok(decisions);
             }
             Ok(Command::Toggle) => {
@@ -349,7 +353,7 @@ fn apply_decision(
         return Ok(Apply::Stay);
     }
     match phase {
-        Phase::Group(_) => apply_group(command, &items, decisions, stdout),
+        Phase::Group(bucket) => apply_group(command, *bucket, &items, decisions, stdout),
         Phase::Drill { index, .. } => {
             let index = (*index).min(items.len() - 1);
             apply_one(command, &items, index, decisions, stdout)
@@ -360,11 +364,20 @@ fn apply_decision(
 
 fn apply_group(
     command: Command,
+    bucket: Bucket,
     items: &[Candidate],
     decisions: &mut Vec<Decision>,
     stdout: &mut dyn Write,
 ) -> Result<Apply> {
     match command {
+        Command::AllRedact(None) if bucket == Bucket::Other => {
+            writeln!(
+                stdout,
+                "`a` skips {} in other. That group is mostly code words. Type `a redact` to redact the ones shown.",
+                items.len()
+            )?;
+            Ok(Apply::Triage)
+        }
         Command::Redact(category) | Command::AllRedact(category) => {
             for item in items {
                 let chosen = category.unwrap_or(item.category);
@@ -452,7 +465,11 @@ fn apply_one(
 fn write_triage(pending: &[Candidate], show_hidden: bool, stdout: &mut dyn Write) -> Result<()> {
     writeln!(
         stdout,
-        "Pick a category. Likely-sensitive groups come first. Low-signal candidates (seen once, or a code word) stay hidden until [v]."
+        "Pick a category. Likely-sensitive groups come first. Low-signal candidates (seen once, a common word, or a code word) stay hidden until [v]."
+    )?;
+    writeln!(
+        stdout,
+        "Phone numbers, Swedish personnummer, and IPv6 are left to the proxy. Phone and personnummer apply only when [redact.pii] is on. This pass does not list them."
     )?;
     let mut parts = Vec::new();
     for bucket in Bucket::all() {
@@ -564,7 +581,7 @@ fn write_help(stdout: &mut dyn Write) -> Result<()> {
     )?;
     writeln!(
         stdout,
-        "a / all-in-group       same choice for every shown candidate in the group. `a` redacts, `a keep` allows, `a skip` leaves them."
+        "a / all-in-group       on secrets, related names, addresses, and names, `a` redacts the shown rows. On other identifiers, `a` skips them; `a redact` redacts those shown. `a keep` allows, `a skip` leaves them. Hidden low-signal rows are not included."
     )?;
     writeln!(
         stdout,
@@ -589,7 +606,40 @@ fn write_help(stdout: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
-fn write_save_summary(decisions: &[Decision], stdout: &mut dyn Write) -> Result<()> {
+fn write_save_summary(
+    decisions: &[Decision],
+    candidates: &[Candidate],
+    stdout: &mut dyn Write,
+) -> Result<()> {
+    let decided: HashSet<&str> = decisions
+        .iter()
+        .map(|decision| decision.key.as_str())
+        .collect();
+    let pending_secrets: Vec<&Candidate> = candidates
+        .iter()
+        .filter(|candidate| candidate.category == LearnCategory::Secret)
+        .filter(|candidate| !decided.contains(candidate.key.as_str()))
+        .collect();
+    if !pending_secrets.is_empty() {
+        writeln!(
+            stdout,
+            "Undecided secrets, not written ({}). Open [1] secrets before quit if one of these should be redacted:",
+            pending_secrets.len()
+        )?;
+        for candidate in pending_secrets.iter().take(12) {
+            writeln!(
+                stdout,
+                "  {}  {}:{}  {}",
+                mask_body(&candidate.text),
+                candidate.first_file,
+                candidate.first_line,
+                candidate.rule.as_deref().unwrap_or("secret")
+            )?;
+        }
+        if pending_secrets.len() > 12 {
+            writeln!(stdout, "  … and {} more", pending_secrets.len() - 12)?;
+        }
+    }
     writeln!(stdout, "Will write to learned.toml:")?;
     let mut names = Vec::new();
     let mut people = Vec::new();
@@ -704,10 +754,17 @@ fn hidden_count(pending: &[Candidate], show_hidden: bool) -> usize {
     }
 }
 
-/// Secrets, emails, addresses, and hosts stay visible. A name you typed stays
-/// visible. Seen-once names, symbols, domains, and code words are low-signal.
-fn is_low_signal(candidate: &Candidate) -> bool {
+/// Secrets, emails, addresses, hosts, full person names, and product codes
+/// stay visible. A name you typed stays visible. Common words, seen-once
+/// names, and plain words seen fewer than three times stay hidden.
+pub(crate) fn is_low_signal(candidate: &Candidate) -> bool {
     if candidate.related || candidate.category == LearnCategory::Secret {
+        return false;
+    }
+    if candidate.rule.as_deref() == Some("product-code") {
+        return false;
+    }
+    if candidate.category == LearnCategory::Person && candidate.text.contains(char::is_whitespace) {
         return false;
     }
     if matches!(
@@ -716,7 +773,19 @@ fn is_low_signal(candidate: &Candidate) -> bool {
     ) {
         return false;
     }
-    if is_stopped(&candidate.text) {
+    if is_stopped(&candidate.text) || is_common(&candidate.text) {
+        return true;
+    }
+    let plain = !candidate.text.contains('_')
+        && !candidate.text.contains('-')
+        && !candidate.text.chars().any(|ch| ch.is_ascii_digit());
+    if plain
+        && candidate.occurrences < 3
+        && matches!(
+            candidate.category,
+            LearnCategory::Symbol | LearnCategory::Name | LearnCategory::Domain
+        )
+    {
         return true;
     }
     candidate.occurrences <= 1
@@ -732,6 +801,9 @@ fn is_low_signal(candidate: &Candidate) -> bool {
 fn bucket(candidate: &Candidate) -> Bucket {
     if candidate.category == LearnCategory::Secret {
         return Bucket::Secret;
+    }
+    if candidate.rule.as_deref() == Some("product-code") {
+        return Bucket::Name;
     }
     if candidate.related {
         return Bucket::Related;
@@ -753,12 +825,19 @@ fn record(
     category: LearnCategory,
 ) {
     decisions.retain(|existing| existing.key != candidate.key);
-    decisions.push(Decision {
+    let mut decision = Decision {
         key: candidate.key.clone(),
         action,
         category,
         text: candidate.text.clone(),
-    });
+        sources: candidate.sources.clone(),
+        left_glued: candidate.left_glued,
+        right_glued: candidate.right_glued,
+    };
+    if decision.sources.is_empty() && !candidate.context.is_empty() {
+        decision.sources.push(candidate.context.clone());
+    }
+    decisions.push(decision);
 }
 
 enum Command {
@@ -935,6 +1014,9 @@ mod tests {
             first_file: "src/fan.rs".to_string(),
             first_line: 1,
             context: format!("let value = \"{text}\";"),
+            sources: vec![format!("let value = \"{text}\";")],
+            left_glued: false,
+            right_glued: false,
             related,
             secretish: category.secretish(),
         }
@@ -1061,13 +1143,17 @@ q
         let twice = sample("zephyr_marker", LearnCategory::Symbol, 2, false);
         let related = sample("zephyr_marker", LearnCategory::Symbol, 1, true);
         let secret = sample("AKIAIOSFODNN7EXAMPLE", LearnCategory::Secret, 1, false);
-        let name = sample("Exempla", LearnCategory::Name, 2, false);
+        let name = sample("Exempla", LearnCategory::Name, 3, false);
+        let rare = sample("Exempla", LearnCategory::Name, 2, false);
+        let common = sample("threshold", LearnCategory::Symbol, 8, false);
         let host = sample("db.tundrahorn.internal", LearnCategory::Host, 1, false);
         assert!(is_low_signal(&once));
         assert!(!is_low_signal(&twice));
         assert!(!is_low_signal(&related));
         assert!(!is_low_signal(&secret));
         assert!(!is_low_signal(&name));
+        assert!(is_low_signal(&rare));
+        assert!(is_low_signal(&common));
         assert!(!is_low_signal(&host));
     }
 

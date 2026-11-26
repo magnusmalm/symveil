@@ -5,8 +5,10 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 
 use anyhow::{bail, Context, Result};
+use regex::Regex;
 use symveil_detect::learned::{
     DecisionRecord, LearnedAllow, LearnedFile, LearnedNames, LearnedRule,
 };
@@ -67,6 +69,7 @@ pub fn file_from_decisions(decisions: &[Decision]) -> Result<LearnedFile> {
     }
     let mut ordered: Vec<Decision> = by_key.into_values().collect();
     ordered.sort_by(|left, right| left.key.cmp(&right.key).then(left.text.cmp(&right.text)));
+    collapse_redundant(&mut ordered);
 
     let mut names = LearnedNames::default();
     let mut secrets = Vec::new();
@@ -82,7 +85,7 @@ pub fn file_from_decisions(decisions: &[Decision]) -> Result<LearnedFile> {
         });
         match decision.action {
             DecisionAction::Keep => push_unique(&mut allow, &decision.text),
-            DecisionAction::Redact => match decision.category {
+            DecisionAction::Redact => match filed_category(decision) {
                 LearnCategory::Name => {
                     check_term(&decision.text)?;
                     push_unique(&mut names.terms, &decision.text);
@@ -116,36 +119,246 @@ pub fn file_from_decisions(decisions: &[Decision]) -> Result<LearnedFile> {
     })
 }
 
+fn filed_category(decision: &Decision) -> LearnCategory {
+    if decision.category == LearnCategory::Person && looks_like_credential(&decision.text) {
+        LearnCategory::Secret
+    } else {
+        decision.category
+    }
+}
+
+/// A hyphenated opaque token is a secret, not a person name.
+fn looks_like_credential(text: &str) -> bool {
+    if text.contains(char::is_whitespace) {
+        return false;
+    }
+    let n = text.chars().count();
+    n >= 12
+        && text.chars().any(|ch| ch.is_ascii_digit())
+        && text.chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
 fn rule(decision: &Decision) -> Result<LearnedRule> {
-    let regex = literal_regex(&decision.text);
-    regex::Regex::new(&regex).with_context(|| {
-        format!(
-            "learned {} rule for a {}-character value",
-            decision.category,
-            decision.text.chars().count()
-        )
-    })?;
+    let regex = matching_regex(
+        &decision.text,
+        &decision.sources,
+        decision.left_glued,
+        decision.right_glued,
+    )?;
     Ok(LearnedRule {
         name: format!(
             "learned-{}-{:016x}",
-            decision.category.as_str(),
+            filed_category(decision).as_str(),
             fnv(&decision.text)
         ),
         regex,
     })
 }
 
-fn literal_regex(text: &str) -> String {
+/// A literal the proxy can match on every stored source line.
+///
+/// `\b` is added on a side only when that side is a word boundary in every
+/// source line. A password glued to `-p` has no leading boundary, so a wrapped
+/// `\b...\b` would never fire. A product code becomes a prefix-and-tail
+/// pattern (`TDH-4471` → `TDH-\d+`) when that pattern still matches the line.
+pub fn matching_regex(
+    text: &str,
+    sources: &[String],
+    left_glued: bool,
+    right_glued: bool,
+) -> Result<String> {
+    if let Some(pattern) = product_code_regex(text) {
+        if covers(&pattern, text, sources)? {
+            return Ok(pattern);
+        }
+    }
     let escaped = regex::escape(text);
-    let word = !text.is_empty()
+    let wordish = !text.is_empty()
         && text
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
-    if word {
-        format!(r"\b{escaped}\b")
-    } else {
-        escaped
+    if !wordish {
+        return covered_or_bail(text, sources, escaped);
     }
+    let left = if left_glued || side_glued(text, sources, true) {
+        ""
+    } else {
+        r"\b"
+    };
+    let right = if right_glued || side_glued(text, sources, false) {
+        ""
+    } else {
+        r"\b"
+    };
+    let wrapped = format!("{left}{escaped}{right}");
+    if covers(&wrapped, text, sources)? {
+        return Ok(wrapped);
+    }
+    covered_or_bail(text, sources, escaped)
+}
+
+fn covered_or_bail(text: &str, sources: &[String], regex: String) -> Result<String> {
+    if covers(&regex, text, sources)? {
+        Ok(regex)
+    } else {
+        bail!(
+            "refusing a learned rule for a {}-character value because it does not match its source line",
+            text.chars().count()
+        )
+    }
+}
+
+fn covers(pattern: &str, text: &str, sources: &[String]) -> Result<bool> {
+    let re = Regex::new(pattern).with_context(|| "learned rule regex")?;
+    let lines: Vec<&str> = sources
+        .iter()
+        .map(String::as_str)
+        .filter(|line| line.contains(text))
+        .collect();
+    if lines.is_empty() {
+        return Ok(re.is_match(text));
+    }
+    Ok(lines.iter().all(|line| re.is_match(line)))
+}
+
+fn side_glued(text: &str, sources: &[String], left: bool) -> bool {
+    sources.iter().any(|line| {
+        let Some(pos) = line.find(text) else {
+            return false;
+        };
+        if left {
+            line[..pos].chars().next_back().is_some_and(is_regex_word)
+        } else {
+            line[pos + text.len()..]
+                .chars()
+                .next()
+                .is_some_and(is_regex_word)
+        }
+    })
+}
+
+fn is_regex_word(ch: char) -> bool {
+    ch == '_' || ch.is_alphanumeric()
+}
+
+static CODE_NUM: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^([A-Z]{2,8})-(\d{2,8})$").expect("numeric product code"));
+static CODE_WORD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^([A-Z]{2,8})-([A-Z]{2,16})-(\d{1,6})$").expect("word product code")
+});
+
+fn product_code_regex(text: &str) -> Option<String> {
+    if let Some(caps) = CODE_NUM.captures(text) {
+        return Some(format!(r"{}\-\d+", regex::escape(&caps[1])));
+    }
+    if let Some(caps) = CODE_WORD.captures(text) {
+        return Some(format!(r"{}\-[A-Z]+-\d+", regex::escape(&caps[1])));
+    }
+    None
+}
+
+const NAME_SUFFIXES: &[&str] = &[
+    "arna", "erna", "orna", "en", "et", "na", "ar", "or", "er", "s",
+];
+
+/// Drop a decision the proxy already covers with a broader term, person, or email.
+fn collapse_redundant(decisions: &mut Vec<Decision>) {
+    let terms: Vec<String> = decisions
+        .iter()
+        .filter(|decision| {
+            decision.action == DecisionAction::Redact && decision.category == LearnCategory::Name
+        })
+        .map(|decision| decision.text.clone())
+        .collect();
+    let people: Vec<String> = decisions
+        .iter()
+        .filter(|decision| {
+            decision.action == DecisionAction::Redact
+                && decision.category == LearnCategory::Person
+                && !looks_like_credential(&decision.text)
+        })
+        .map(|decision| decision.text.clone())
+        .collect();
+    let emails: Vec<String> = decisions
+        .iter()
+        .filter(|decision| {
+            decision.action == DecisionAction::Redact && decision.category == LearnCategory::Email
+        })
+        .map(|decision| decision.text.to_lowercase())
+        .collect();
+    decisions.retain(|decision| {
+        decision.action != DecisionAction::Redact || !redundant(decision, &terms, &people, &emails)
+    });
+}
+
+fn redundant(decision: &Decision, terms: &[String], people: &[String], emails: &[String]) -> bool {
+    if decision.category == LearnCategory::Name {
+        if terms
+            .iter()
+            .any(|term| term != &decision.text && same_or_suffix(&decision.text, term))
+        {
+            return true;
+        }
+        let words: Vec<&str> = decision.text.split_whitespace().collect();
+        if words.len() >= 2
+            && words
+                .iter()
+                .all(|word| terms.iter().any(|term| letters(term) == letters(word)))
+        {
+            return true;
+        }
+        if people.iter().any(|person| {
+            person
+                .split_whitespace()
+                .any(|token| letters(token) == letters(&decision.text))
+        }) {
+            return true;
+        }
+    }
+    if matches!(
+        decision.category,
+        LearnCategory::Symbol | LearnCategory::Host | LearnCategory::Domain
+    ) {
+        if product_code_regex(&decision.text).is_some() {
+            return false;
+        }
+        let own = letters(&decision.text);
+        if terms.iter().any(|term| {
+            let base = letters(term);
+            base.len() >= 3 && own.starts_with(&base) && own.len() > base.len()
+        }) {
+            return true;
+        }
+        let lower = decision.text.to_lowercase();
+        if emails
+            .iter()
+            .any(|email| email.contains(&lower) && email != &lower)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn same_or_suffix(text: &str, broader: &str) -> bool {
+    let own = letters(text);
+    let base = letters(broader);
+    if own == base {
+        return text != broader
+            && (text.chars().count() > broader.chars().count()
+                || (text.chars().count() == broader.chars().count() && text > broader));
+    }
+    own.starts_with(&base)
+        && NAME_SUFFIXES
+            .iter()
+            .any(|suffix| own == format!("{base}{suffix}"))
+}
+
+fn letters(text: &str) -> String {
+    text.chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
 }
 
 fn fnv(text: &str) -> u64 {
@@ -374,5 +587,99 @@ mod tests {
         };
         assert_eq!(loaded[0].key, first[0].key);
         assert_eq!(loaded[0].action, DecisionAction::Keep);
+    }
+
+    #[test]
+    fn glued_password_rule_matches_its_source_line() {
+        let line = "\"mysql -h db.tundrahorn.corp -pSVCNAgentPassw0rd\"";
+        let mut decision = Decision::new(
+            DecisionAction::Redact,
+            LearnCategory::Secret,
+            "SVCNAgentPassw0rd",
+        );
+        decision.sources = vec![line.to_string()];
+        decision.left_glued = true;
+        let file = file_from_decisions(&[decision]).unwrap();
+        let regex = &file.secrets[0].regex;
+        assert!(
+            !regex.starts_with(r"\b"),
+            "a boundary before the password cannot match `-p`: {regex}"
+        );
+        let re = regex::Regex::new(regex).unwrap();
+        assert!(re.is_match(line), "{regex} did not match {line}");
+    }
+
+    #[test]
+    fn word_fragment_inside_an_identifier_is_not_a_dead_boundary() {
+        let line = "#define TDH_FAN_MAX 2400";
+        let regex = super::matching_regex("MAX", &[line.to_string()], true, false).unwrap();
+        let re = regex::Regex::new(&regex).unwrap();
+        assert!(re.is_match(line), "{regex} did not match {line}");
+        assert!(
+            !regex.starts_with(r"\b"),
+            "a leading boundary cannot match inside TDH_FAN_MAX: {regex}"
+        );
+    }
+
+    #[test]
+    fn product_code_becomes_a_prefix_and_tail_pattern() {
+        let line = "code: TDH-4471";
+        let regex = super::matching_regex("TDH-4471", &[line.to_string()], false, false).unwrap();
+        assert_eq!(regex, r"TDH\-\d+");
+        assert!(regex::Regex::new(&regex).unwrap().is_match(line));
+        let fan = super::matching_regex("FAN-ALPHA-2", &["/* FAN-ALPHA-2 */".into()], false, false)
+            .unwrap();
+        assert!(regex::Regex::new(&fan).unwrap().is_match("see FAN-BETA-9"));
+    }
+
+    #[test]
+    fn broader_terms_absorb_suffixes_symbols_and_email_fragments() {
+        let decisions = vec![
+            Decision::new(DecisionAction::Redact, LearnCategory::Name, "Exempla"),
+            Decision::new(DecisionAction::Redact, LearnCategory::Name, "Exemplas"),
+            Decision::new(DecisionAction::Redact, LearnCategory::Name, "exempla_"),
+            Decision::new(
+                DecisionAction::Redact,
+                LearnCategory::Name,
+                "Exempla Tundrahorn",
+            ),
+            Decision::new(DecisionAction::Redact, LearnCategory::Name, "Tundrahorn"),
+            Decision::new(
+                DecisionAction::Redact,
+                LearnCategory::Symbol,
+                "tundrahorn_fan_init",
+            ),
+            Decision::new(
+                DecisionAction::Redact,
+                LearnCategory::Email,
+                "fan.operator@exempla.test",
+            ),
+            Decision::new(
+                DecisionAction::Redact,
+                LearnCategory::Domain,
+                "exempla.test",
+            ),
+            Decision::new(
+                DecisionAction::Redact,
+                LearnCategory::Person,
+                "svcn-pytest-opaque-0001",
+            ),
+        ];
+        let file = file_from_decisions(&decisions).unwrap();
+        assert_eq!(
+            file.names.terms,
+            vec!["Exempla".to_string(), "Tundrahorn".to_string()]
+        );
+        assert!(file.symbols.is_empty(), "{:?}", file.symbols);
+        assert!(file.names.people.is_empty(), "{:?}", file.names.people);
+        assert!(file.secrets.iter().any(|rule| {
+            regex::Regex::new(&rule.regex)
+                .unwrap()
+                .is_match("svcn-pytest-opaque-0001")
+        }));
+        assert!(file
+            .secrets
+            .iter()
+            .all(|rule| !rule.regex.contains("exempla.test") || rule.regex.contains('@')));
     }
 }

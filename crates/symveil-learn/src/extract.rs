@@ -7,7 +7,7 @@ use regex::Regex;
 use symveil_detect::secrets::{high_entropy_hits, scan_secrets};
 
 use crate::model::{key_for, Candidate, LearnCategory};
-use crate::stoplist::is_stopped;
+use crate::stoplist::{is_common, is_stopped};
 use crate::walk::WalkedFile;
 
 static IDENT: LazyLock<Regex> =
@@ -30,6 +30,16 @@ static IPV4: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("ipv4")
 });
+static PRODUCT_CODE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b[A-Z]{2,8}-\d{2,8}\b|\b[A-Z]{2,8}-[A-Z]{2,16}-\d{1,6}\b").expect("product code")
+});
+static FLAG_SECRET: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:--password(?:=|\s+)|-p)([A-Za-z][A-Za-z0-9!@#$%^&*._-]{7,80})")
+        .expect("flag secret")
+});
+static PERSON_PAIR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(\p{Lu}\p{Ll}{1,30})\s+(\p{Lu}\p{Ll}{2,40})\b").expect("person pair")
+});
 
 struct RawHit {
     start: usize,
@@ -49,6 +59,9 @@ struct Acc {
     first_file: String,
     first_line: u32,
     context: String,
+    sources: Vec<String>,
+    left_glued: bool,
+    right_glued: bool,
     code_hits: u64,
     comment_hits: u64,
 }
@@ -162,6 +175,9 @@ fn finish(key: String, item: Acc) -> Option<Candidate> {
         first_file: item.first_file,
         first_line: item.first_line,
         context: item.context,
+        sources: item.sources,
+        left_glued: item.left_glued,
+        right_glued: item.right_glued,
         related: false,
         secretish: item.category.secretish(),
     })
@@ -174,6 +190,7 @@ fn merge(acc: &mut HashMap<String, Acc>, file: &WalkedFile, hit: RawHit) {
     let key = key_for(hit.category, &hit.text);
     let line = line_of(&file.text, hit.start);
     let context = source_line(&file.text, hit.start, hit.end);
+    let (left_glued, right_glued) = glued(&file.text, hit.start, hit.end);
     let entry = acc.entry(key).or_insert_with(|| Acc {
         text: hit.text.clone(),
         category: hit.category,
@@ -183,11 +200,22 @@ fn merge(acc: &mut HashMap<String, Acc>, file: &WalkedFile, hit: RawHit) {
         first_file: file.relative.clone(),
         first_line: line,
         context: context.clone(),
+        sources: Vec::new(),
+        left_glued: false,
+        right_glued: false,
         code_hits: 0,
         comment_hits: 0,
     });
     entry.occurrences += 1;
     entry.files.insert(file.relative.clone());
+    entry.left_glued |= left_glued;
+    entry.right_glued |= right_glued;
+    if entry.sources.len() < 6
+        && !context.is_empty()
+        && !entry.sources.iter().any(|line| line == &context)
+    {
+        entry.sources.push(context.clone());
+    }
     if hit.in_comment {
         entry.comment_hits += 1;
     } else {
@@ -201,6 +229,23 @@ fn merge(acc: &mut HashMap<String, Acc>, file: &WalkedFile, hit: RawHit) {
         entry.first_file = file.relative.clone();
         entry.first_line = line;
     }
+}
+
+fn glued(text: &str, start: usize, end: usize) -> (bool, bool) {
+    if start > text.len()
+        || end > text.len()
+        || !text.is_char_boundary(start)
+        || !text.is_char_boundary(end)
+    {
+        return (false, false);
+    }
+    let left = text[..start].chars().next_back().is_some_and(is_regex_word);
+    let right = text[end..].chars().next().is_some_and(is_regex_word);
+    (left, right)
+}
+
+fn is_regex_word(ch: char) -> bool {
+    ch == '_' || ch.is_alphanumeric()
 }
 
 fn sort_candidates(candidates: &mut [Candidate]) {
@@ -250,6 +295,9 @@ fn extract_file(text: &str) -> Vec<RawHit> {
     push_emails(text, &comments, &blocked, &mut hits);
     push_ips(text, &comments, &blocked, &mut hits);
     push_hosts(text, &comments, &blocked, &mut hits);
+    push_product_codes(text, &comments, &mut blocked, &mut hits);
+    push_flag_secrets(text, &comments, &mut blocked, &mut hits);
+    push_people(text, &comments, &blocked, &mut hits);
     push_identifiers(text, &comments, &blocked, &mut hits);
     push_strings(text, &strings, &comments, &blocked, &mut hits);
     push_capitalised(text, &comments, &blocked, &mut hits);
@@ -404,14 +452,37 @@ fn skip_host(host: &str) -> bool {
     if SOURCE_EXT.contains(&tld) {
         return true;
     }
-    lower == "example.com"
+    if lower == "example.com"
         || lower == "example.org"
         || lower == "example.net"
         || lower.ends_with(".example")
         || lower.ends_with(".invalid")
         || lower.ends_with(".localhost")
         || lower.ends_with(".test")
+    {
+        return true;
+    }
+    let labels: Vec<&str> = lower.split('.').filter(|label| !label.is_empty()).collect();
+    let Some(tld) = labels.last() else {
+        return true;
+    };
+    CODE_TLDS.contains(tld)
+        || labels.iter().any(|label| {
+            matches!(
+                *label,
+                "environ" | "getenv" | "os" | "fake" | "getattr" | "setattr"
+            )
+        })
 }
+
+const CODE_TLDS: &[&str] = &[
+    "append", "args", "argv", "bool", "clone", "close", "cls", "copy", "decode", "encode", "env",
+    "environ", "err", "expect", "extend", "fake", "false", "float", "format", "func", "get",
+    "getenv", "getattr", "hasattr", "init", "insert", "int", "items", "join", "json", "keys",
+    "len", "loads", "lower", "main", "new", "none", "open", "path", "pop", "read", "remove",
+    "replace", "self", "setattr", "split", "str", "strip", "this", "true", "type", "unwrap",
+    "update", "upper", "values", "write",
+];
 
 fn is_ipv4(value: &str) -> bool {
     let mut parts = value.split('.');
@@ -444,6 +515,115 @@ const SOURCE_EXT: &[&str] = &[
     "sh", "sql", "toml", "ts", "tsx", "txt", "vue", "xml", "yaml", "yml",
 ];
 
+fn push_product_codes(
+    text: &str,
+    comments: &[(usize, usize)],
+    blocked: &mut Vec<(usize, usize)>,
+    hits: &mut Vec<RawHit>,
+) {
+    for matched in PRODUCT_CODE.find_iter(text) {
+        if overlaps(blocked, matched.start(), matched.end()) {
+            continue;
+        }
+        blocked.push((matched.start(), matched.end()));
+        hits.push(raw(
+            text,
+            matched.start(),
+            matched.end(),
+            LearnCategory::Symbol,
+            Some("product-code".to_string()),
+            in_ranges(comments, matched.start(), matched.end()),
+        ));
+    }
+}
+
+fn push_flag_secrets(
+    text: &str,
+    comments: &[(usize, usize)],
+    blocked: &mut Vec<(usize, usize)>,
+    hits: &mut Vec<RawHit>,
+) {
+    for caps in FLAG_SECRET.captures_iter(text) {
+        let Some(value) = caps.get(1) else {
+            continue;
+        };
+        if !value.as_str().chars().any(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        if overlaps(blocked, value.start(), value.end()) {
+            continue;
+        }
+        blocked.push((value.start(), value.end()));
+        hits.push(raw(
+            text,
+            value.start(),
+            value.end(),
+            LearnCategory::Secret,
+            Some("command-flag".to_string()),
+            in_ranges(comments, value.start(), value.end()),
+        ));
+    }
+}
+
+fn push_people(
+    text: &str,
+    comments: &[(usize, usize)],
+    blocked: &[(usize, usize)],
+    hits: &mut Vec<RawHit>,
+) {
+    for caps in PERSON_PAIR.captures_iter(text) {
+        let Some(whole) = caps.get(0) else {
+            continue;
+        };
+        if overlaps(blocked, whole.start(), whole.end()) || pem_line(text, whole.start()) {
+            continue;
+        }
+        let Some(first) = caps.get(1) else {
+            continue;
+        };
+        let Some(last) = caps.get(2) else {
+            continue;
+        };
+        if is_common(first.as_str())
+            || is_common(last.as_str())
+            || is_stopped(first.as_str())
+            || is_stopped(last.as_str())
+        {
+            continue;
+        }
+        if first.as_str().chars().count() < 3 || last.as_str().chars().count() < 3 {
+            continue;
+        }
+        hits.push(raw(
+            text,
+            whole.start(),
+            whole.end(),
+            LearnCategory::Person,
+            None,
+            in_ranges(comments, whole.start(), whole.end()),
+        ));
+    }
+}
+
+fn pem_line(text: &str, start: usize) -> bool {
+    let (line_start, line_end) = line_bounds(text, start);
+    let line = &text[line_start..line_end];
+    line.contains("PRIVATE KEY") || line.contains("OPENSSH") || line.contains("-----BEGIN")
+}
+
+fn line_bounds(text: &str, start: usize) -> (usize, usize) {
+    let start = start.min(text.len());
+    let line_start = text[..start]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let line_end = text[start..]
+        .find('\n')
+        .map(|index| start + index)
+        .unwrap_or(text.len());
+    (line_start, line_end)
+}
+
 fn push_identifiers(
     text: &str,
     comments: &[(usize, usize)],
@@ -455,12 +635,29 @@ fn push_identifiers(
             continue;
         }
         let ident = matched.as_str();
-        if is_hex_token(ident) || is_uuid(ident) {
+        if is_hex_token(ident)
+            || is_uuid(ident)
+            || !ident_edges(text, matched.start(), matched.end())
+        {
+            continue;
+        }
+        if pem_line(text, matched.start()) {
+            continue;
+        }
+        let in_comment = in_ranges(comments, matched.start(), matched.end());
+        if opaque_token(ident) {
+            hits.push(raw(
+                text,
+                matched.start(),
+                matched.end(),
+                LearnCategory::Secret,
+                Some("token-literal".to_string()),
+                in_comment,
+            ));
             continue;
         }
         let tokens = split_ident(ident);
         let interesting = tokens.iter().any(|token| token_ok(token));
-        let in_comment = in_ranges(comments, matched.start(), matched.end());
         // A single token is classified below. Pushing it again as a symbol
         // would hide the name category and keep a one-off comment word.
         if interesting && ident_ok(ident) && tokens.len() != 1 {
@@ -482,6 +679,9 @@ fn push_identifiers(
             };
             let start = matched.start() + offset;
             let end = start + token.len();
+            if token.chars().all(|ch| ch.is_ascii_uppercase()) && token.chars().count() <= 6 {
+                continue;
+            }
             let category = if looks_like_name(&token) {
                 LearnCategory::Name
             } else {
@@ -507,7 +707,19 @@ fn push_strings(
         if value.chars().count() < 3 || value.chars().count() > 80 || value.contains('\n') {
             continue;
         }
-        if value.contains("://") || is_stopped(value) {
+        if value.contains("://") || is_stopped(value) || pem_line(text, start) {
+            continue;
+        }
+        if opaque_token(value) {
+            let trim_start = text[start..end].find(value).unwrap_or(0);
+            hits.push(raw(
+                text,
+                start + trim_start,
+                start + trim_start + value.len(),
+                LearnCategory::Secret,
+                Some("token-literal".to_string()),
+                in_ranges(comments, start, end),
+            ));
             continue;
         }
         let words: Vec<&str> = value.split_whitespace().collect();
@@ -582,6 +794,30 @@ fn raw(
         rule,
         in_comment,
     }
+}
+
+fn ident_edges(text: &str, start: usize, end: usize) -> bool {
+    let left = text[..start]
+        .chars()
+        .next_back()
+        .is_none_or(|ch| !ch.is_alphabetic());
+    let right = text[end..]
+        .chars()
+        .next()
+        .is_none_or(|ch| !ch.is_alphabetic());
+    left && right
+}
+
+fn opaque_token(value: &str) -> bool {
+    let n = value.chars().count();
+    (12..=80).contains(&n)
+        && !value.contains(' ')
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        && value.chars().any(|ch| ch.is_ascii_digit())
+        && value.chars().any(|ch| ch.is_ascii_alphabetic())
+        && (value.contains('_') || value.contains('-') || n >= 16)
 }
 
 fn token_ok(token: &str) -> bool {
@@ -691,6 +927,14 @@ fn text_slice(text: &str, start: usize, end: usize) -> &str {
 fn source_line(text: &str, start: usize, end: usize) -> String {
     if text.is_empty() || start > text.len() {
         return String::new();
+    }
+    if start <= end
+        && end <= text.len()
+        && text.is_char_boundary(start)
+        && text.is_char_boundary(end)
+        && text[start..end].contains('\n')
+    {
+        return text[start..end].to_string();
     }
     let start = floor_boundary(text, start);
     let line_start = text[..start]
@@ -914,5 +1158,89 @@ fn return_value() {}
                 "init".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn full_person_name_and_product_codes_are_kept_whole() {
+        let found = only(
+            "Author: Ren Testdotter <fan@exempla.test>\ncode: TDH-4471\n/* FAN-ALPHA-2 */\n#define TDH_FAN_MAX 2400\n",
+        );
+        assert!(
+            has(&found, LearnCategory::Person, "Ren Testdotter"),
+            "{found:?}"
+        );
+        assert!(has(&found, LearnCategory::Symbol, "TDH-4471"), "{found:?}");
+        assert!(
+            has(&found, LearnCategory::Symbol, "FAN-ALPHA-2"),
+            "{found:?}"
+        );
+        assert!(
+            found.iter().all(|candidate| candidate.text != "MAX"),
+            "a fragment of TDH_FAN_MAX was learned: {found:?}"
+        );
+        let code = found
+            .iter()
+            .find(|candidate| candidate.text == "TDH-4471")
+            .unwrap();
+        let regex = crate::store::matching_regex(
+            &code.text,
+            &code.sources,
+            code.left_glued,
+            code.right_glued,
+        )
+        .unwrap();
+        assert!(regex::Regex::new(&regex).unwrap().is_match("TDH-4471"));
+        assert!(regex::Regex::new(&regex)
+            .unwrap()
+            .is_match(&code.sources[0]));
+    }
+
+    #[test]
+    fn agent_password_glued_to_a_flag_is_a_secret_that_matches() {
+        let line = "\"mysql -h db.tundrahorn.corp -pSVCNAgentPassw0rd\"";
+        let found = only(line);
+        let secret = found
+            .iter()
+            .find(|candidate| candidate.text == "SVCNAgentPassw0rd")
+            .unwrap_or_else(|| panic!("{found:?}"));
+        assert_eq!(secret.category, LearnCategory::Secret);
+        assert!(secret.left_glued, "password is glued to -p");
+        let regex = crate::store::matching_regex(
+            &secret.text,
+            &secret.sources,
+            secret.left_glued,
+            secret.right_glued,
+        )
+        .unwrap();
+        assert!(regex::Regex::new(&regex).unwrap().is_match(line), "{regex}");
+    }
+
+    #[test]
+    fn unicode_words_and_code_hosts_are_not_split_into_junk() {
+        let found = only(
+            "fläkt fönster tröskel\nos.environ.get('X')\norg.fake.Example\nprint(os.environ)\n",
+        );
+        assert!(found.iter().all(|candidate| candidate.text != "nster"));
+        assert!(found.iter().all(|candidate| candidate.text != "skel"));
+        assert!(found
+            .iter()
+            .all(|candidate| candidate.category != LearnCategory::Host
+                || !candidate.text.contains("environ")));
+        assert!(found.iter().all(|candidate| candidate.text != "org.fake"));
+    }
+
+    #[test]
+    fn openssh_block_is_not_filed_as_symbols() {
+        let found = only(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nSVCNOPENSSHKEYLINE0001\n-----END OPENSSH PRIVATE KEY-----\n",
+        );
+        assert!(found.iter().all(|candidate| {
+            candidate.category != LearnCategory::Symbol
+                || (!candidate.text.contains("OPENSSH") && !candidate.text.contains("PRIVATE"))
+        }));
+        assert!(found.iter().any(|candidate| {
+            candidate.category == LearnCategory::Secret
+                && candidate.text.contains("OPENSSH PRIVATE KEY")
+        }));
     }
 }

@@ -108,6 +108,10 @@ struct LearnArgs {
     /// Follow symlinks that resolve inside the scan root. Links that leave the root are never opened.
     #[arg(long)]
     follow_symlinks: bool,
+    /// Also scan build directories other than `.git`, and text inside files
+    /// skipped by extension (pdf, png, zip, and the rest).
+    #[arg(long)]
+    include_skipped: bool,
 }
 
 #[derive(clap::Args)]
@@ -145,6 +149,7 @@ fn learn_options(args: LearnArgs) -> LearnOptions {
         max_bytes: args.max_bytes,
         gitignore: !args.no_gitignore,
         follow_symlinks: args.follow_symlinks,
+        include_skipped: args.include_skipped,
     }
 }
 

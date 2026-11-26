@@ -12,6 +12,13 @@ pub fn is_stopped(word: &str) -> bool {
     STOPPED.contains(lower.as_str())
 }
 
+/// Ordinary words and the synthetic benign list. They stay candidates so
+/// `[v]` can show them, and they stay hidden until then.
+pub fn is_common(word: &str) -> bool {
+    let lower = word.to_lowercase();
+    COMMON.iter().any(|item| *item == lower)
+}
+
 const WORDS: &[&str] = &[
     "abstract",
     "alias",
@@ -659,9 +666,56 @@ const WORDS: &[&str] = &[
     "hh",
 ];
 
+const COMMON: &[&str] = &[
+    "access",
+    "api",
+    "arbete",
+    "assertion",
+    "aws",
+    "cell",
+    "company",
+    "compile",
+    "define",
+    "echo",
+    "environ",
+    "exempel",
+    "fake",
+    "fictional",
+    "fläkt",
+    "fönster",
+    "gitlab",
+    "home",
+    "host",
+    "klocka",
+    "line",
+    "max",
+    "metadata",
+    "morgon",
+    "mysql",
+    "nster",
+    "openai",
+    "print",
+    "product",
+    "real",
+    "repository",
+    "sensor",
+    "shape",
+    "skel",
+    "skola",
+    "slack",
+    "stripe",
+    "threshold",
+    "traceback",
+    "träd",
+    "tröskel",
+    "vanlig",
+    "vatten",
+    "workflow",
+];
+
 #[cfg(test)]
 mod tests {
-    use super::is_stopped;
+    use super::{is_common, is_stopped};
 
     #[test]
     fn keywords_and_ordinary_code_words_are_stopped() {
@@ -677,5 +731,9 @@ mod tests {
         assert!(!is_stopped("Exempla"));
         assert!(!is_stopped("Tundrahorn"));
         assert!(!is_stopped("Testdotter"));
+        assert!(!is_common("Exempla"));
+        assert!(is_common("fläkt"));
+        assert!(is_common("threshold"));
+        assert!(is_common("FAKE"));
     }
 }

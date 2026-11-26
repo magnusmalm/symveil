@@ -7,6 +7,8 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+mod corpus;
 mod extract;
 #[cfg(test)]
 mod guard;
@@ -44,6 +46,9 @@ pub struct Options {
     /// Follow symlinks that resolve inside the scan root. Default is off,
     /// and a link that resolves outside the root is never followed.
     pub follow_symlinks: bool,
+    /// Also scan build directories other than `.git`, and text inside files
+    /// that are normally skipped by extension.
+    pub include_skipped: bool,
 }
 
 /// CLI entry. Refuses to run when LLM or proxy endpoint variables are set.
@@ -70,6 +75,7 @@ pub fn execute(opts: &Options, stdin: &mut dyn BufRead, stdout: &mut dyn Write) 
             max_bytes: opts.max_bytes,
             gitignore: opts.gitignore,
             follow_symlinks: opts.follow_symlinks,
+            include_skipped: opts.include_skipped,
         },
     )?;
     let mut candidates = extract::extract(&walked.files);
@@ -192,6 +198,10 @@ mod report {
             stats.large,
             stats.binary
         )?;
+        let skips = crate::walk::skip_summary(stats);
+        if !skips.is_empty() {
+            writeln!(stdout, "{skips}")?;
+        }
         writeln!(
             stdout,
             "a name in this list is a candidate, not proof it must be redacted, and absence is not proof it is safe to send."
