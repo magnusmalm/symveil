@@ -403,11 +403,12 @@ fn redundant(decision: &Decision, terms: &[String], emails: &[String]) -> bool {
         if product_code_regex(&decision.text).is_some() {
             return false;
         }
-        let own = letters(&decision.text);
-        if terms.iter().any(|term| {
-            let base = letters(term);
-            base.len() >= 3 && own.starts_with(&base) && own.len() > base.len()
-        }) {
+        // A suffix (`Exemplas`, `exempla_`) is already covered. A longer
+        // identifier (`tundrahorn_fan_init`) is not: the tail would stay visible.
+        if terms
+            .iter()
+            .any(|term| same_or_suffix(&decision.text, term))
+        {
             return true;
         }
         let lower = decision.text.to_lowercase();
@@ -717,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn broader_terms_absorb_suffixes_symbols_and_email_fragments() {
+    fn broader_terms_absorb_suffixes_and_keep_full_identifiers() {
         let decisions = vec![
             Decision::new(DecisionAction::Redact, LearnCategory::Name, "Exempla"),
             Decision::new(DecisionAction::Redact, LearnCategory::Name, "Exemplas"),
@@ -754,7 +755,14 @@ mod tests {
             file.names.terms,
             vec!["Exempla".to_string(), "Tundrahorn".to_string()]
         );
-        assert!(file.symbols.is_empty(), "{:?}", file.symbols);
+        assert!(
+            file.symbols
+                .iter()
+                .any(|rule| rule.regex.contains("tundrahorn_fan_init")),
+            "the full identifier should stay when the term only covers its prefix: {:?}",
+            file.symbols
+        );
+        assert_eq!(file.symbols.len(), 1, "{:?}", file.symbols);
         assert!(file.names.people.is_empty(), "{:?}", file.names.people);
         assert!(file.secrets.iter().any(|rule| {
             regex::Regex::new(&rule.regex)

@@ -760,16 +760,16 @@ fn hidden_count(pending: &[Candidate], show_hidden: bool) -> usize {
     }
 }
 
-/// Secrets, emails, addresses, hosts, full person names, and product codes
-/// stay visible. A name you typed stays visible. Common words, seen-once
-/// names, and plain words seen fewer than three times stay hidden.
+/// Secrets, emails, addresses, hosts, full person names, product codes, and
+/// full identifiers stay visible. A name you typed stays visible. Common words,
+/// seen-once names, and plain words seen fewer than three times stay hidden.
 pub(crate) fn is_low_signal(candidate: &Candidate) -> bool {
     if candidate.related || candidate.category == LearnCategory::Secret {
         return false;
     }
     if matches!(
         candidate.rule.as_deref(),
-        Some("product-code") | Some("product-prefix")
+        Some("product-code") | Some("product-prefix") | Some("macro")
     ) {
         return false;
     }
@@ -811,7 +811,10 @@ fn bucket(candidate: &Candidate) -> Bucket {
     if candidate.category == LearnCategory::Secret {
         return Bucket::Secret;
     }
-    if candidate.rule.as_deref() == Some("product-code") {
+    if matches!(
+        candidate.rule.as_deref(),
+        Some("product-code") | Some("macro")
+    ) {
         return Bucket::Name;
     }
     if candidate.related {

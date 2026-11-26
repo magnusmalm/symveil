@@ -30,15 +30,15 @@ const TEXT_SET: usize = 64;
 /// Masked items, plus the three whole secrets the harness leaves visible.
 const PLANTED_SET: usize = 73;
 
-// Baseline of `triage` on this corpus. A partial that becomes full still passes.
-// 49/55 useful is 89%. Two entries also touch an `expect = keep` item.
-const TEXT_FULL_FLOOR: usize = 49;
+// Measured triage on this corpus. A partial that becomes full still passes.
+// 54/58 useful is 93%. A keep hit is a precision failure, so the ceiling is 0.
+const TEXT_FULL_FLOOR: usize = 52;
 const TEXT_COVERED_FLOOR: usize = 53;
-const PLANTED_FULL_FLOOR: usize = 52;
+const PLANTED_FULL_FLOOR: usize = 55;
 const PLANTED_COVERED_FLOOR: usize = 60;
-const USEFUL_FLOOR: usize = 49;
-const PRECISION_PERCENT_FLOOR: usize = 89;
-const KEEP_HIT_CEILING: usize = 2;
+const USEFUL_FLOOR: usize = 54;
+const PRECISION_PERCENT_FLOOR: usize = 93;
+const KEEP_HIT_CEILING: usize = 0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Hit {
@@ -167,14 +167,37 @@ fn corpus_rules_match_their_source_and_leave_benign_words() {
     );
     assert!(learned.names.terms.iter().any(|term| term == "Exempla"));
     assert!(learned.names.terms.iter().any(|term| term == "Tundrahorn"));
-    assert!(learned.names.terms.iter().any(|term| term == "TDH"));
-    for value in ["Exemplas", "TDH_FAN_MAX", "Exem-pla", "tundrahorn_fan_init"] {
+    assert!(
+        learned
+            .names
+            .terms
+            .iter()
+            .all(|term| term != "TDH" && term != "FAN"),
+        "a three-letter prefix was filed as a term: {:?}",
+        learned.names.terms
+    );
+    for value in ["Exemplas", "Exem-pla"] {
         assert_ne!(
             cover_value(&learned, value),
             Hit::Miss,
             "{value} is not covered when the company name is accepted"
         );
     }
+    assert_eq!(
+        cover_value(&learned, "TDH_FAN_MAX"),
+        Hit::Full,
+        "TDH_FAN_MAX should be a learned literal, not a short term"
+    );
+    assert_eq!(
+        cover_value(&learned, "tundrahorn_fan_init"),
+        Hit::Full,
+        "tundrahorn_fan_init should be a learned literal"
+    );
+    assert_eq!(
+        cover_value(&learned, "db_backup.fan_line.internal"),
+        Hit::Full,
+        "underscore host was not learned in full"
+    );
     assert_eq!(
         cover_value(&learned, "TDH-4471"),
         Hit::Full,
@@ -216,9 +239,9 @@ fn corpus_rules_match_their_source_and_leave_benign_words() {
         useful >= USEFUL_FLOOR && entries > 0 && useful * 100 / entries >= PRECISION_PERCENT_FLOOR,
         "precision regressed: {useful}/{entries}"
     );
-    assert!(
-        keep_hits <= KEEP_HIT_CEILING,
-        "keep-item hits rose to {keep_hits}"
+    assert_eq!(
+        keep_hits, KEEP_HIT_CEILING,
+        "a learned entry matches an expect=keep item"
     );
     let _ = fs::remove_dir_all(&root);
 }
@@ -302,8 +325,10 @@ fn triage(candidates: &[crate::model::Candidate]) -> Vec<Decision> {
     for candidate in candidates {
         let action = if is_low_signal(candidate)
             || (candidate.category == LearnCategory::Symbol
-                && candidate.rule.as_deref() != Some("product-code"))
-        {
+                && !matches!(
+                    candidate.rule.as_deref(),
+                    Some("product-code") | Some("macro")
+                )) {
             DecisionAction::Skip
         } else {
             DecisionAction::Redact

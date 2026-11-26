@@ -1,6 +1,6 @@
 //! Deterministic candidate extraction. No model calls.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -83,10 +83,14 @@ pub fn extract(files: &[WalkedFile]) -> Vec<Candidate> {
     candidates
 }
 
-/// `TDH-4471` and `TDH_FAN_MAX` share a prefix. File that prefix as a name term
-/// so the macro is covered with the same separator rules as other terms.
+/// A product prefix longer than three letters can be a term. `TDH` and `FAN`
+/// cannot: a case-insensitive term with inflection suffixes also matches
+/// `firmware/fan.git` and `TDH_API_KEY`. File the full identifier
+/// (`TDH_FAN_MAX`, `tundrahorn_fan_init`) instead, and skip names that are
+/// assigned (`TDH_API_KEY=...`).
 fn add_product_prefix_hits(files: &[WalkedFile], acc: &mut HashMap<String, Acc>) {
-    let mut prefixes = Vec::new();
+    let mut short_prefixes = Vec::new();
+    let mut long_prefixes = Vec::new();
     for item in acc.values() {
         if item.rule.as_deref() != Some("product-code") {
             continue;
@@ -95,15 +99,20 @@ fn add_product_prefix_hits(files: &[WalkedFile], acc: &mut HashMap<String, Acc>)
             continue;
         };
         let len = prefix.chars().count();
-        if (3..=8).contains(&len)
-            && prefix.bytes().all(|byte| byte.is_ascii_uppercase())
-            && !prefixes.iter().any(|existing: &String| existing == prefix)
-        {
-            prefixes.push(prefix.to_string());
+        if !(3..=8).contains(&len) || !prefix.bytes().all(|byte| byte.is_ascii_uppercase()) {
+            continue;
+        }
+        let bucket = if len <= 3 {
+            &mut short_prefixes
+        } else {
+            &mut long_prefixes
+        };
+        if !bucket.iter().any(|existing: &String| existing == prefix) {
+            bucket.push(prefix.to_string());
         }
     }
     for file in files {
-        for prefix in &prefixes {
+        for prefix in &long_prefixes {
             let marker = format!("{prefix}_");
             let Some(pos) = file.text.find(&marker) else {
                 continue;
@@ -122,6 +131,79 @@ fn add_product_prefix_hits(files: &[WalkedFile], acc: &mut HashMap<String, Acc>)
             );
         }
     }
+    promote_full_identifiers(files, acc, &short_prefixes);
+}
+
+fn promote_full_identifiers(
+    files: &[WalkedFile],
+    acc: &mut HashMap<String, Acc>,
+    short_prefixes: &[String],
+) {
+    let names: Vec<String> = acc
+        .values()
+        .filter(|item| {
+            item.category == LearnCategory::Name
+                && item.rule.as_deref() != Some("product-prefix")
+                && item.text.chars().all(|ch| ch.is_alphanumeric())
+                && item.text.chars().count() >= 4
+                && !is_common(&item.text)
+                && !is_stopped(&item.text)
+        })
+        .map(|item| item.text.to_lowercase())
+        .collect();
+    let mut assignments = HashSet::new();
+    let mut hits = Vec::new();
+    for file in files {
+        for matched in IDENT.find_iter(&file.text) {
+            let ident = matched.as_str();
+            if !ident.contains('_') {
+                continue;
+            }
+            if is_assignment(&file.text, matched.end()) {
+                assignments.insert(ident.to_string());
+            }
+            if full_form(ident, short_prefixes, &names) && !hits.iter().any(|seen| seen == ident) {
+                hits.push(ident.to_string());
+            }
+        }
+    }
+    let found = hits;
+    let promoted: Vec<String> = found
+        .iter()
+        .filter(|ident| {
+            !assignments.contains(*ident)
+                && !found.iter().any(|other| {
+                    other.len() > ident.len()
+                        && other.starts_with(ident.as_str())
+                        && other.as_bytes().get(ident.len()) == Some(&b'_')
+                })
+        })
+        .cloned()
+        .collect();
+    for ident in promoted {
+        let key = key_for(LearnCategory::Symbol, &ident);
+        if let Some(entry) = acc.get_mut(&key) {
+            if entry.category == LearnCategory::Symbol && entry.rule.is_none() {
+                entry.rule = Some("macro".to_string());
+            }
+        }
+    }
+}
+
+fn full_form(ident: &str, short_prefixes: &[String], names: &[String]) -> bool {
+    let tokens: Vec<&str> = ident.split('_').filter(|token| !token.is_empty()).collect();
+    if tokens.len() < 2 {
+        return false;
+    }
+    tokens.iter().any(|token| {
+        short_prefixes.iter().any(|prefix| prefix == token)
+            || names.iter().any(|name| name == &token.to_lowercase())
+    })
+}
+
+fn is_assignment(text: &str, end: usize) -> bool {
+    let rest = text[end..].trim_start_matches([' ', '\t']);
+    rest.starts_with('=') && !rest.starts_with("==")
 }
 
 /// A capitalised pair whose words already stand alone is a company or product
@@ -555,8 +637,9 @@ const CODE_TLDS: &[&str] = &[
     "update", "upper", "values", "write",
 ];
 
-/// Letters, digits, and hyphens only. A label glued out of a filename
-/// (`txtfl`, `txtpk`) is not a hostname.
+/// Letters, digits, hyphens, and underscores. Internal names such as
+/// `db_backup.fan_line.internal` are hosts. NUL, other controls, and a label
+/// glued out of a filename (`txtfl`, `txtpk`) are not.
 pub(crate) fn hostname_labels_valid(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host.is_empty() {
@@ -576,7 +659,7 @@ fn hostname_label_valid(label: &str) -> bool {
     }
     if !bytes
         .iter()
-        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_')
     {
         return false;
     }
@@ -613,10 +696,11 @@ fn registrable(host: &str) -> Option<String> {
     ))
 }
 
+/// File and VCS suffixes. `fan.git` is a repository path, not a hostname.
 const SOURCE_EXT: &[&str] = &[
-    "c", "cc", "cfg", "cpp", "cs", "css", "csv", "cxx", "env", "go", "h", "hh", "hpp", "html",
-    "hxx", "ini", "java", "js", "json", "jsx", "kt", "lock", "md", "php", "py", "rb", "rs", "scss",
-    "sh", "sql", "toml", "ts", "tsx", "txt", "vue", "xml", "yaml", "yml",
+    "c", "cc", "cfg", "cpp", "cs", "css", "csv", "cxx", "env", "git", "go", "h", "hh", "hpp",
+    "html", "hxx", "ini", "java", "js", "json", "jsx", "kt", "lock", "md", "php", "py", "rb", "rs",
+    "scss", "sh", "sql", "toml", "ts", "tsx", "txt", "vue", "xml", "yaml", "yml",
 ];
 
 fn push_product_codes(
@@ -1383,10 +1467,16 @@ fn return_value() {}
         assert!(has(&found, LearnCategory::Name, "Exempla"), "{found:?}");
         assert!(has(&found, LearnCategory::Name, "Tundrahorn"), "{found:?}");
         assert!(
+            found
+                .iter()
+                .all(|candidate| candidate.text != "TDH" && candidate.text != "FAN"),
+            "a three-letter product prefix was filed as a term: {found:?}"
+        );
+        assert!(
             found.iter().any(|candidate| {
-                candidate.text == "TDH" && candidate.rule.as_deref() == Some("product-prefix")
+                candidate.text == "TDH_FAN_MAX" && candidate.rule.as_deref() == Some("macro")
             }),
-            "{found:?}"
+            "TDH_FAN_MAX should be the learned literal: {found:?}"
         );
         let author = found.iter().find(|candidate| candidate.text == "Author");
         assert!(
@@ -1412,5 +1502,43 @@ fn return_value() {}
             .iter()
             .filter(|candidate| candidate.category == LearnCategory::Host)
             .all(|candidate| hostname_labels_valid(&candidate.text)));
+    }
+
+    #[test]
+    fn underscore_internal_host_is_kept_and_binary_glue_is_not() {
+        assert!(hostname_labels_valid("db_backup.fan_line.internal"));
+        assert!(!hostname_labels_valid("readme.txtfl"));
+        assert!(!hostname_labels_valid("readme.txtpk"));
+        assert!(!hostname_labels_valid("db_backup.fan\u{0}line.internal"));
+        assert!(!hostname_labels_valid("db_backup.fan\u{1}line.internal"));
+        let found = only(
+            "/* db_backup.fan_line.internal */\ncode: TDH-4471\n#define TDH_FAN_MAX 2400\nTDH_API_KEY=12345678\n",
+        );
+        assert!(
+            has(&found, LearnCategory::Host, "db_backup.fan_line.internal"),
+            "{found:?}"
+        );
+        assert!(
+            found.iter().all(|candidate| {
+                candidate.text != "TDH_API_KEY" || candidate.rule.as_deref() != Some("macro")
+            }),
+            "an assignment name was filed as a literal: {found:?}"
+        );
+        assert!(found.iter().any(|candidate| {
+            candidate.text == "TDH_FAN_MAX" && candidate.rule.as_deref() == Some("macro")
+        }));
+    }
+
+    #[test]
+    fn a_git_suffix_is_not_a_host() {
+        let found = only("git@git.tdh.corp:firmware/fan.git\n");
+        assert!(
+            found.iter().all(|candidate| candidate.text != "fan.git"),
+            "{found:?}"
+        );
+        assert!(
+            has(&found, LearnCategory::Host, "git.tdh.corp"),
+            "{found:?}"
+        );
     }
 }
