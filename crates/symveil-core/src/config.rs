@@ -3,8 +3,10 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use regex::Regex;
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
+use symveil_detect::learned::LearnedFile;
 
 fn default_listen() -> String {
     "127.0.0.1".to_string()
@@ -337,6 +339,10 @@ pub struct RedactSection {
     /// Company, product, project, and person names. Empty leaves names untouched.
     #[serde(default)]
     pub names: NamesSection,
+    /// `learned.toml` from `symveil learn`. Relative to the repository root.
+    /// When omitted, the proxy reads the user config path if that file exists.
+    #[serde(default)]
+    pub learned: Option<String>,
 }
 
 impl Default for RedactSection {
@@ -353,6 +359,7 @@ impl Default for RedactSection {
             high_entropy: false,
             pii: PiiSection::default(),
             names: NamesSection::default(),
+            learned: None,
         }
     }
 }
@@ -413,6 +420,16 @@ pub struct Config {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
+        let mut cfg = Self::load_file(path)?;
+        let root = path
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        cfg.merge_discovered_learned(root)?;
+        Ok(cfg)
+    }
+
+    fn load_file(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("read config {}", path.display()))?;
         Self::parse(&text).with_context(|| format!("parse config {}", path.display()))
@@ -430,15 +447,104 @@ impl Config {
     }
 
     /// Load `explicit` when given, otherwise the nearest `.symveil.toml` at or above `root`.
+    ///
+    /// A `learned.toml` is merged afterwards: `[redact] learned` if set, else
+    /// `SYMVEIL_LEARNED`, else the user config file when it exists. Missing
+    /// default path is not an error. Learn does not call this function.
     pub fn load_for(root: &Path, explicit: Option<&Path>) -> Result<Self> {
-        if let Some(path) = explicit {
-            return Self::load(path);
-        }
-        if let Some(path) = discover(root) {
-            return Self::load(&path);
-        }
-        Ok(Self::default())
+        let mut cfg = if let Some(path) = explicit {
+            Self::load_file(path)?
+        } else if let Some(path) = discover(root) {
+            Self::load_file(&path)?
+        } else {
+            Self::default()
+        };
+        cfg.merge_discovered_learned(root)?;
+        Ok(cfg)
     }
+
+    /// Merge a `learned.toml` document into this config.
+    pub fn apply_learned_toml(&mut self, text: &str) -> Result<()> {
+        let file = LearnedFile::parse(text)?;
+        self.merge_learned(&file)
+    }
+
+    fn merge_learned(&mut self, file: &LearnedFile) -> Result<()> {
+        for term in &file.names.terms {
+            push_unique(&mut self.redact.names.terms, term);
+        }
+        for person in &file.names.people {
+            push_unique(&mut self.redact.names.people, person);
+        }
+        for entry in &file.allow.entries {
+            push_unique(&mut self.redact.allow, entry);
+        }
+        for rule in file.secrets.iter().chain(file.symbols.iter()) {
+            if self
+                .redact
+                .secrets
+                .iter()
+                .any(|existing| existing.name == rule.name)
+            {
+                anyhow::bail!(
+                    "learned rule `{}` uses the same name as a secret rule already in the config",
+                    rule.name
+                );
+            }
+            Regex::new(&rule.regex).with_context(|| format!("learned rule `{}`", rule.name))?;
+            self.redact.secrets.push(SecretRule {
+                name: rule.name.clone(),
+                regex: rule.regex.clone(),
+                action: None,
+            });
+        }
+        self.validate()
+    }
+
+    fn merge_discovered_learned(&mut self, root: &Path) -> Result<()> {
+        let Some(path) = self.learned_source(root) else {
+            return Ok(());
+        };
+        if !path.is_file() {
+            if self.redact.learned.is_some() || learned_env_is_set() {
+                anyhow::bail!("learned file {} does not exist", path.display());
+            }
+            return Ok(());
+        }
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("read learned rules {}", path.display()))?;
+        self.apply_learned_toml(&text)
+            .with_context(|| format!("parse learned rules {}", path.display()))
+    }
+
+    fn learned_source(&self, root: &Path) -> Option<PathBuf> {
+        if let Some(configured) = &self.redact.learned {
+            return Some(resolve_path(root, configured));
+        }
+        if let Some(path) = learned_env_path() {
+            return Some(path);
+        }
+        symveil_detect::learned::default_path()
+    }
+}
+
+fn push_unique(list: &mut Vec<String>, value: &str) {
+    if !value.is_empty() && !list.iter().any(|existing| existing == value) {
+        list.push(value.to_string());
+    }
+}
+
+fn learned_env_path() -> Option<PathBuf> {
+    let value = std::env::var_os("SYMVEIL_LEARNED")?;
+    if value.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(value))
+    }
+}
+
+fn learned_env_is_set() -> bool {
+    learned_env_path().is_some()
 }
 
 pub fn discover(start: &Path) -> Option<PathBuf> {
@@ -742,5 +848,83 @@ mod tests {
         assert!(message.contains("\"block\""), "{message}");
         assert!(message.contains("\"pass\""), "{message}");
         assert!(message.contains("\"scan\""), "{message}");
+    }
+
+    #[test]
+    fn learned_file_merges_names_symbols_and_allow_into_the_engine() {
+        let mut cfg = Config::parse("[redact]\ninternal_domains = []\n").unwrap();
+        cfg.apply_learned_toml(
+            r#"
+            version = 1
+
+            [names]
+            terms = ["Exempla"]
+            people = ["Ren Testdotter"]
+
+            [[symbols]]
+            name = "learned-symbol-fan"
+            regex = '\baurora_rcc_enable_pll\b'
+
+            [allow]
+            entries = ["Tundrahorn", "AKIAIOSFODNN7EXAMPLE"]
+            "#,
+        )
+        .unwrap();
+        cfg.redact.names.terms.push("Tundrahorn".to_string());
+        let mut engine =
+            crate::redact::Engine::new(crate::vault::Vault::ephemeral(), &cfg.redact).unwrap();
+        let input = "Exempla aurora_rcc_enable_pll Tundrahorn Ren Testdotter AKIAIOSFODNN7EXAMPLE";
+        let (out, _) = engine.redact_str(input).unwrap();
+        assert!(!out.contains("Exempla"), "{out}");
+        assert!(!out.contains("aurora_rcc_enable_pll"), "{out}");
+        assert!(!out.contains("Testdotter"), "{out}");
+        assert!(out.contains("Tundrahorn"), "{out}");
+        assert!(!out.contains("AKIA"), "{out}");
+        assert_eq!(engine.restore_str(&out), input);
+    }
+
+    #[test]
+    fn load_for_reads_an_explicit_learned_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "symveil-learned-load-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("learned.toml"), "[names]\nterms = [\"Exempla\"]\n").unwrap();
+        std::fs::write(
+            dir.join(".symveil.toml"),
+            "[redact]\nlearned = \"learned.toml\"\ninternal_domains = []\n",
+        )
+        .unwrap();
+        let cfg = Config::load_for(&dir, None).unwrap();
+        assert!(cfg.redact.names.terms.iter().any(|term| term == "Exempla"));
+
+        std::fs::write(
+            dir.join(".symveil.toml"),
+            "[redact]\nlearned = \"missing.toml\"\n",
+        )
+        .unwrap();
+        let err = Config::load_for(&dir, None).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("does not exist"), "{message}");
+        assert!(message.contains("missing.toml"), "{message}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_learned_rule_cannot_reuse_a_builtin_name() {
+        let mut cfg = Config::default();
+        let err = cfg
+            .apply_learned_toml(
+                "[[secrets]]\nname = \"aws-access-key-id\"\nregex = 'AKIA[0-9A-Z]{16}'\n",
+            )
+            .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("aws-access-key-id"), "{message}");
+        assert!(message.contains("Rename"), "{message}");
     }
 }

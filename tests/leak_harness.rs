@@ -39,6 +39,23 @@ const COMMAND_FILES: &[&str] = &[
 ];
 
 #[test]
+fn leak_corpus() {
+    let root = manifest().join("target/leak-corpus");
+    let name = root
+        .file_name()
+        .and_then(|item| item.to_str())
+        .unwrap_or("");
+    assert_eq!(name, "leak-corpus", "refusing to reset {name}");
+    let seed = Seed::load(&manifest().join("tests/leak/seed.json")).expect("seed");
+    corpus::generate(&seed, &root).expect("generate");
+    assert!(
+        root.join("firmware/tundrahorn_fan.c").is_file(),
+        "corpus missing firmware/tundrahorn_fan.c"
+    );
+    eprintln!("corpus: {}", root.display());
+}
+
+#[test]
 fn leak_canary_shapes() {
     let seed = Seed::load(&manifest().join("tests/leak/seed.json")).expect("seed");
     let mut engine = build_engine(Vault::ephemeral(), &evaluated_redact()).expect("engine");
@@ -119,10 +136,15 @@ async fn leak_measurement() {
                 .to_string(),
         );
     }
+    let gated = run.gated_leak_ids();
+    if !gated.is_empty() {
+        problems.push(format!("gated leaks: {}", gated.join(", ")));
+    }
     if problems.is_empty() {
         eprintln!(
-            "{}\nreport: {}/report.md",
+            "{}\ngated leaks: {}\nreport: {}/report.md",
             run.verdict,
+            gated.len(),
             std::env::var("SYMVEIL_LEAK_OUT").unwrap_or_else(|_| "target/leak-report".into())
         );
         return;
