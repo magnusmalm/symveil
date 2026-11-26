@@ -200,6 +200,59 @@ impl fmt::Display for Mode {
     }
 }
 
+/// What to do with an inline image, document, or file content block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BinaryMode {
+    /// Replace the block with a short text note. This is the default.
+    #[default]
+    Block,
+    /// Forward the block unchanged.
+    Pass,
+    /// Decode the payload and withhold the block when a term or detector matches.
+    Scan,
+}
+
+impl BinaryMode {
+    fn parse(value: &str) -> std::result::Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "block" => Ok(Self::Block),
+            "pass" => Ok(Self::Pass),
+            "scan" => Ok(Self::Scan),
+            other => Err(format!(
+                "unknown binary mode `{other}`; expected \"block\", \"pass\", or \"scan\""
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BinaryMode {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl fmt::Display for BinaryMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Block => "block",
+            Self::Pass => "pass",
+            Self::Scan => "scan",
+        })
+    }
+}
+
+/// `[binary]`. Missing means [`BinaryMode::Block`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BinarySection {
+    pub mode: BinaryMode,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserPattern {
@@ -360,6 +413,9 @@ pub struct Config {
     pub index: IndexSection,
     #[serde(default)]
     pub redact: RedactSection,
+    /// Inline image, document, and file blocks. The default withholds them.
+    #[serde(default)]
+    pub binary: BinarySection,
 }
 
 impl Config {
@@ -529,6 +585,7 @@ mod tests {
         assert_eq!(cfg.proxy.openai_base, "https://api.openai.com");
         assert_eq!(cfg.redact.internal_domains, vec!["corp", "internal", "lan"]);
         assert_eq!(cfg.redact.mode, Mode::Enforce);
+        assert_eq!(cfg.binary.mode, BinaryMode::Block);
         assert!(cfg.redact.secrets.is_empty());
         assert!(cfg.redact.builtin_actions.is_empty());
         assert!(!cfg.redact.high_entropy);
@@ -775,6 +832,22 @@ mod tests {
         assert_eq!(cfg.redact.secrets[0].name, "acme-factory-token");
         assert_eq!(cfg.redact.secrets[0].action, Some(Action::Warn));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn binary_mode_defaults_to_block_and_rejects_unknown_values() {
+        let cfg = Config::parse("[redact]\n").unwrap();
+        assert_eq!(cfg.binary.mode, BinaryMode::Block);
+        let pass = Config::parse("[binary]\nmode = \"PASS\"\n").unwrap();
+        assert_eq!(pass.binary.mode, BinaryMode::Pass);
+        let scan = Config::parse("[binary]\nmode = \"scan\"\n").unwrap();
+        assert_eq!(scan.binary.mode, BinaryMode::Scan);
+        let err = Config::parse("[binary]\nmode = \"drop\"\n").unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("unknown binary mode `drop`"), "{message}");
+        assert!(message.contains("\"block\""), "{message}");
+        assert!(message.contains("\"pass\""), "{message}");
+        assert!(message.contains("\"scan\""), "{message}");
     }
 
     #[test]

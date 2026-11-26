@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use crate::binary::BinaryNote;
 use crate::category::Category;
 use crate::config::Action;
 use crate::redact::Hit;
@@ -18,6 +19,17 @@ pub struct AuditEvent {
     pub replacements: Option<Vec<AuditReplacement>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restored: Option<usize>,
+    /// Image, document, and file blocks replaced before the request was forwarded.
+    /// Kind and length only. The bytes are not stored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binaries: Option<Vec<BinaryAudit>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BinaryAudit {
+    pub kind: &'static str,
+    pub bytes: usize,
+    pub disposition: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,16 +95,39 @@ impl AuditLog {
         })
     }
 
-    pub fn record_request(&mut self, path: &str, hits: &[Hit]) -> Result<()> {
-        if hits.is_empty() {
+    pub fn record_request(
+        &mut self,
+        path: &str,
+        hits: &[Hit],
+        binaries: &[BinaryNote],
+    ) -> Result<()> {
+        if hits.is_empty() && binaries.is_empty() {
             return Ok(());
         }
         let event = AuditEvent {
             ts: timestamp_now(),
             dir: "request",
             path: path.to_string(),
-            replacements: Some(hits.iter().map(replacement_from_hit).collect()),
+            replacements: if hits.is_empty() {
+                None
+            } else {
+                Some(hits.iter().map(replacement_from_hit).collect())
+            },
             restored: None,
+            binaries: if binaries.is_empty() {
+                None
+            } else {
+                Some(
+                    binaries
+                        .iter()
+                        .map(|note| BinaryAudit {
+                            kind: note.kind,
+                            bytes: note.bytes,
+                            disposition: "withheld",
+                        })
+                        .collect(),
+                )
+            },
         };
         self.write(&event)
     }
@@ -107,6 +142,7 @@ impl AuditLog {
             path: path.to_string(),
             replacements: None,
             restored: Some(restored),
+            binaries: None,
         };
         self.write(&event)
     }
@@ -296,5 +332,29 @@ mod tests {
         assert!(json.contains("10.1.2.3"), "{json}");
         assert!(json.contains("\"action\":\"warn\""));
         assert!(!json.contains("placeholder"), "{json}");
+    }
+
+    #[test]
+    fn binary_withholding_is_logged_without_the_payload() {
+        let dir = temp_dir("audit-binary");
+        let path = dir.join("audit.jsonl");
+        let mut log = AuditLog::open(&path).unwrap();
+        log.record_request(
+            "/v1/messages",
+            &[],
+            &[BinaryNote {
+                kind: "image",
+                bytes: 128,
+            }],
+        )
+        .unwrap();
+        drop(log);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"kind\":\"image\""), "{text}");
+        assert!(text.contains("\"bytes\":128"), "{text}");
+        assert!(text.contains("\"disposition\":\"withheld\""), "{text}");
+        assert!(!text.contains("iVBOR"), "{text}");
+        assert!(!text.contains("png.author"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

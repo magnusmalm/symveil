@@ -10,6 +10,8 @@ The vault and the audit log stay on the machine. The vault file is encrypted; th
 
 The free tier masks secrets, and company, product, project, and person names listed in `[redact.names]`. The identifier index is the Pro plugin at [symveil.dev](https://symveil.dev).
 
+Inline image, document, and file blocks are withheld by default and replaced with a short text note. A remote `http` or `https` image URL is left in place. See [Binary content](#binary-content).
+
 ## What it masks
 
 Builtin rules, always on:
@@ -192,6 +194,9 @@ timeout_secs = 900
 audit_log = ".symveil/audit.jsonl"
 vault = ".symveil/vault.json"
 
+[binary]
+mode = "block"
+
 [redact]
 # enforce (default) honors each action. observe treats every match as warn.
 mode = "enforce"
@@ -230,6 +235,29 @@ The official OpenAI and Anthropic Python SDKs, and the Anthropic TypeScript SDK,
 Personal data stays off until `[redact.pii]` sets `email`, `phone`, or `personnummer`. See [Optional personal data](#optional-personal-data).
 
 `.symveil/` is gitignored. The vault is the reverse map, including secrets and, when those rules are on, personal-data values. SymVeil encrypts it with AES-256-GCM. The key is stored in the OS keychain (macOS Keychain, Linux Secret Service, or Windows Credential Manager), under the service name `symveil` and an account named from a random id in the vault header, so moving the file does not lose the key. A vault whose account was still a hash of the path is migrated the next time it is opened at that path. An existing `.symveil/vault.key` is moved into that keychain on open and then removed. When no keychain can be opened, SymVeil falls back to `.symveil/vault.key` (mode `0600`; the directory is `0700` when SymVeil creates it) and prints a warning that a copy of the directory can decrypt the vault. A locked keychain is not that fallback: startup fails and leaves the vault unchanged. The audit log does not contain secret values or personal-data values. It is mode `0600` and is not encrypted. Encryption does not hide the vault from a process running as the same user, or from root. Do not copy `.symveil/` off the machine. Details: [docs/design/vault-at-rest.md](docs/design/vault-at-rest.md).
+
+## Binary content
+
+An agent that reads a PNG or a PDF does not send the file as text. Claude Code sends an Anthropic `image` or `document` block whose `source.data` is base64. OpenAI-style clients send `image_url` (often a `data:` URL), `input_image`, `input_file`, or `file`. The same blocks show up nested in `tool_result` content, and in an OpenAI tool message. Text rules do not see the bytes inside those blocks, so a hostname or a name in a PNG `tEXt` chunk would leave as part of the image.
+
+By default SymVeil replaces each of those blocks with a text block and forwards the rest of the JSON unchanged:
+
+```text
+[symveil: image withheld, 1234 bytes]
+```
+
+`document` and `file` use those words in the same sentence. A Responses `input_image` or `input_file` becomes an `input_text` block so the request stays valid. The audit line records the kind, the length, and `"disposition":"withheld"`. It does not record the bytes. The proxy log counts them and does not print the payload.
+
+```toml
+[binary]
+mode = "block"
+```
+
+`block` is the default when `[binary]` is missing. `pass` forwards the block unchanged, including a payload that contains a secret. `scan` decodes the base64 and withholds the block when a configured name, a learned vault term, or a detector matches the decoded bytes, read as ASCII, UTF-8, and UTF-16LE. If the base64 does not decode, or the block has no bytes to read (a `file_id` and nothing else), the block is withheld.
+
+A remote `http` or `https` image URL is not fetched and is not replaced. The URL string is still scanned by the text rules, except in `pass` mode, which leaves the block untouched. A `data:` URL is inline content and is withheld. A document or file URL is withheld too.
+
+An unknown `mode` fails at startup and names `block`, `pass`, and `scan`.
 
 ## Learning lists
 

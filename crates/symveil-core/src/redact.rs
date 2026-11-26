@@ -3,8 +3,9 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::binary::{self, BinaryNote};
 use crate::category::Category;
-use crate::config::{Action, Mode, RedactSection};
+use crate::config::{Action, BinaryMode, Mode, RedactSection};
 use crate::masker::{Boundary, Candidate, Masker};
 use crate::names::NameMasker;
 use crate::pii::PiiMasker;
@@ -39,6 +40,8 @@ pub struct Engine {
     mode: Mode,
     rule_actions: HashMap<String, Action>,
     category_actions: HashMap<Category, Action>,
+    binary_mode: BinaryMode,
+    binary_notes: Vec<BinaryNote>,
 }
 
 impl Engine {
@@ -83,7 +86,19 @@ impl Engine {
             mode: redact.mode,
             rule_actions,
             category_actions,
+            binary_mode: BinaryMode::Block,
+            binary_notes: Vec::new(),
         })
+    }
+
+    /// `[binary] mode`. The constructed engine withholds inline binaries.
+    pub fn set_binary_mode(&mut self, mode: BinaryMode) {
+        self.binary_mode = mode;
+    }
+
+    /// Blocks replaced by the last [`Engine::redact_bytes`] call.
+    pub fn take_binary_notes(&mut self) -> Vec<BinaryNote> {
+        std::mem::take(&mut self.binary_notes)
     }
 
     pub fn placeholder(&self, original: &str) -> Option<&str> {
@@ -115,6 +130,7 @@ impl Engine {
     }
 
     pub fn redact_bytes(&mut self, body: &[u8]) -> Result<(Vec<u8>, Vec<Hit>)> {
+        self.binary_notes.clear();
         if body.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
@@ -147,6 +163,22 @@ impl Engine {
     }
 
     fn redact_value(&mut self, value: &mut Value, hits: &mut Vec<Hit>) -> Result<()> {
+        if value.is_object() {
+            let decision = self.decide_binary(value.as_object().expect("object"));
+            match decision {
+                binary::Decision::Recurse => {}
+                binary::Decision::Leave => return Ok(()),
+                binary::Decision::Replace {
+                    kind,
+                    bytes,
+                    text_type,
+                } => {
+                    self.binary_notes.push(BinaryNote { kind, bytes });
+                    *value = binary::withheld_block(text_type, kind, bytes);
+                    return Ok(());
+                }
+            }
+        }
         let number_text = match &*value {
             Value::Number(number) => Some(number.to_string()),
             _ => None,
@@ -176,6 +208,42 @@ impl Engine {
             Value::Null | Value::Bool(_) | Value::Number(_) => {}
         }
         Ok(())
+    }
+
+    fn decide_binary(&self, object: &serde_json::Map<String, Value>) -> binary::Decision {
+        binary::decide(object, self.binary_mode, |bytes| self.bytes_have_hit(bytes))
+    }
+
+    /// ASCII (each byte as a character), UTF-8, and UTF-16LE. A hit is a
+    /// detector span or a learned vault term. The bytes themselves are not logged.
+    fn bytes_have_hit(&self, bytes: &[u8]) -> bool {
+        let latin1: String = bytes.iter().copied().map(char::from).collect();
+        if self.text_has_hit(&latin1) {
+            return true;
+        }
+        if bytes.iter().any(|byte| *byte >= 128) {
+            let utf8 = String::from_utf8_lossy(bytes);
+            if self.text_has_hit(&utf8) {
+                return true;
+            }
+        }
+        if bytes.len() < 2 {
+            return false;
+        }
+        let (pairs, _) = bytes.as_chunks::<2>();
+        let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+        self.text_has_hit(&String::from_utf16_lossy(&units))
+    }
+
+    fn text_has_hit(&self, text: &str) -> bool {
+        if !self.plan(text).is_empty() {
+            return true;
+        }
+        const MIN_CHARS: usize = 3;
+        self.vault.iter().any(|entry| {
+            let original = entry.original.as_str();
+            original.chars().count() >= MIN_CHARS && text.contains(original)
+        })
     }
 
     /// Object keys are scanned, and a string value is also tried in its key's
@@ -522,7 +590,13 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::config::{Action, Config, Mode, PiiSection, RedactSection, SecretRule, UserPattern};
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as Base64;
+
+    use crate::config::{
+        Action, BinaryMode, Config, Mode, NamesSection, PiiSection, RedactSection, SecretRule,
+        UserPattern,
+    };
 
     fn engine(redact: RedactSection) -> Engine {
         Engine::new(Vault::ephemeral(), &redact).unwrap()
@@ -962,6 +1036,292 @@ mod tests {
         let rendered = String::from_utf8_lossy(&out);
         assert!(rendered.contains("AKIAIOSFODNN7EXAMPLE"));
         assert!(!rendered.contains("@@sv:"));
+    }
+
+    fn b64(bytes: &[u8]) -> String {
+        Base64::encode(&STANDARD, bytes)
+    }
+
+    fn plain_engine() -> Engine {
+        engine(RedactSection {
+            internal_domains: Vec::new(),
+            ..RedactSection::default()
+        })
+    }
+
+    #[test]
+    fn block_mode_replaces_binary_blocks_and_keeps_the_rest() {
+        let mut engine = plain_engine();
+        let png = b"\x89PNG\r\nAKIASVCNCANARYKEY001";
+        let pdf = b"%PDF-1.4 pdf.author@exempla.test";
+        let image = serde_json::json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": b64(png)}
+        });
+        let body = serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "key AKIAIOSFODNN7EXAMPLE and describe the image"},
+                    image,
+                    {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64(pdf)}},
+                    {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{}", b64(png))}},
+                    {"type": "file", "file": {"filename": "notes.pdf", "file_data": format!("data:application/pdf;base64,{}", b64(pdf))}},
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_png",
+                        "content": [
+                            image,
+                            {"type": "text", "text": "nested note AKIAIOSFODNN7EXAMPLE"}
+                        ]
+                    }
+                ]
+            }],
+            "input": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "keep me"},
+                    {"type": "input_image", "image_url": format!("data:image/png;base64,{}", b64(png))},
+                    {"type": "input_file", "filename": "notes.pdf", "file_data": format!("data:application/pdf;base64,{}", b64(pdf))}
+                ]
+            }]
+        });
+        let raw = serde_json::to_vec(&body).unwrap();
+        let (out, hits) = engine.redact_bytes(&raw).unwrap();
+        let notes = engine.take_binary_notes();
+        assert_eq!(notes.len(), 7, "{notes:?}");
+        assert!(notes
+            .iter()
+            .any(|note| note.kind == "image" && note.bytes == png.len()));
+        assert!(notes
+            .iter()
+            .any(|note| note.kind == "document" && note.bytes == pdf.len()));
+        assert!(notes
+            .iter()
+            .any(|note| note.kind == "file" && note.bytes == pdf.len()));
+        let value: Value = serde_json::from_slice(&out).unwrap();
+        let content = &value["messages"][0]["content"];
+        let text = content[0]["text"].as_str().unwrap();
+        assert!(text.contains("describe the image"), "{text}");
+        assert!(!text.contains("AKIA"), "{text}");
+        assert_eq!(
+            content[1]["text"],
+            format!("[symveil: image withheld, {} bytes]", png.len())
+        );
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(
+            content[2]["text"],
+            format!("[symveil: document withheld, {} bytes]", pdf.len())
+        );
+        assert_eq!(content[3]["type"], "text");
+        assert!(content[3]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("[symveil: image withheld,"));
+        assert_eq!(content[4]["type"], "text");
+        assert!(content[4]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("[symveil: file withheld,"));
+        assert_eq!(content[5]["type"], "tool_result");
+        assert_eq!(content[5]["tool_use_id"], "toolu_png");
+        assert_eq!(
+            content[5]["content"][0]["text"],
+            format!("[symveil: image withheld, {} bytes]", png.len())
+        );
+        let nested = content[5]["content"][1]["text"].as_str().unwrap();
+        assert!(nested.starts_with("nested note "), "{nested}");
+        assert!(!nested.contains("AKIA"), "{nested}");
+        let input = &value["input"][0]["content"];
+        assert_eq!(input[0]["text"], "keep me");
+        assert_eq!(input[1]["type"], "input_text");
+        assert_eq!(input[2]["type"], "input_text");
+        assert!(input[2]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("[symveil: file withheld,"));
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(!rendered.contains("AKIASVCNCANARYKEY001"), "{rendered}");
+        assert!(!rendered.contains("pdf.author@exempla.test"), "{rendered}");
+        assert!(!rendered.contains(&b64(png)), "{rendered}");
+        assert!(hits
+            .iter()
+            .any(|hit| hit.original == "AKIAIOSFODNN7EXAMPLE"));
+        assert_eq!(value["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn pass_mode_leaves_binary_blocks_and_still_redacts_text() {
+        let mut engine = plain_engine();
+        engine.set_binary_mode(BinaryMode::Pass);
+        let png = b"\x89PNG\r\nAKIASVCNCANARYKEY001";
+        let data = b64(png);
+        let clean = serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "describe the image"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}}
+                ]
+            }]
+        });
+        let raw = serde_json::to_vec(&clean).unwrap();
+        let (out, hits) = engine.redact_bytes(&raw).unwrap();
+        assert!(hits.is_empty());
+        assert!(engine.take_binary_notes().is_empty());
+        assert_eq!(out, raw);
+
+        let mixed = serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "key AKIAIOSFODNN7EXAMPLE"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}}
+                ]
+            }]
+        });
+        let (out, _) = engine
+            .redact_bytes(&serde_json::to_vec(&mixed).unwrap())
+            .unwrap();
+        let value: Value = serde_json::from_slice(&out).unwrap();
+        assert!(!value["messages"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("AKIA"));
+        assert_eq!(value["messages"][0]["content"][1]["source"]["data"], data);
+        assert!(engine.take_binary_notes().is_empty());
+    }
+
+    #[test]
+    fn remote_https_image_urls_pass_and_data_urls_are_withheld() {
+        let mut engine = engine(RedactSection {
+            internal_domains: vec!["internal".into()],
+            ..RedactSection::default()
+        });
+        let body = serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "url", "url": "https://cdn.example.test/a.png"}},
+                    {"type": "image", "source": {"type": "url", "url": "https://wiki.exempla.internal/a.png"}},
+                    {"type": "image_url", "image_url": {"url": "http://cdn.example.test/b.png"}},
+                    {"type": "document", "source": {"type": "url", "url": "https://cdn.example.test/a.pdf"}}
+                ]
+            }]
+        });
+        let (out, _) = engine
+            .redact_bytes(&serde_json::to_vec(&body).unwrap())
+            .unwrap();
+        let notes = engine.take_binary_notes();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(notes[0].kind, "document");
+        let value: Value = serde_json::from_slice(&out).unwrap();
+        let content = &value["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(
+            content[0]["source"]["url"],
+            "https://cdn.example.test/a.png"
+        );
+        let internal = content[1]["source"]["url"].as_str().unwrap();
+        assert!(!internal.contains("wiki.exempla.internal"), "{internal}");
+        assert!(internal.contains("@@sv:"), "{internal}");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[2]["type"], "image_url");
+        assert_eq!(
+            content[2]["image_url"]["url"],
+            "http://cdn.example.test/b.png"
+        );
+        assert_eq!(content[3]["type"], "text");
+        assert!(content[3]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("[symveil: document withheld,"));
+    }
+
+    #[test]
+    fn scan_withholds_on_a_hit_or_a_decode_error_and_passes_a_clean_payload() {
+        let mut engine = engine(RedactSection {
+            internal_domains: Vec::new(),
+            names: NamesSection {
+                terms: vec!["Exempla".into()],
+                ..NamesSection::default()
+            },
+            ..RedactSection::default()
+        });
+        engine.set_binary_mode(BinaryMode::Scan);
+        let dirty = serde_json::json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": b64(b"hello Exempla")}
+        });
+        let clean = serde_json::json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": b64(b"hello")}
+        });
+        let broken = serde_json::json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "****"}
+        });
+        let body = serde_json::json!({"content": [dirty, clean, broken]});
+        let (out, _) = engine
+            .redact_bytes(&serde_json::to_vec(&body).unwrap())
+            .unwrap();
+        let notes = engine.take_binary_notes();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        let value: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(value["content"][0]["type"], "text");
+        assert_eq!(value["content"][1]["type"], "image");
+        assert_eq!(value["content"][1]["source"]["data"], b64(b"hello"));
+        assert_eq!(value["content"][2]["type"], "text");
+        assert_eq!(
+            value["content"][2]["text"],
+            "[symveil: image withheld, 4 bytes]"
+        );
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(!rendered.contains("Exempla"), "{rendered}");
+    }
+
+    #[test]
+    fn scan_reads_utf16le_and_learned_vault_terms() {
+        let mut vault = Vault::ephemeral();
+        vault
+            .assign("svcn-learned-term-0001", Category::Identifier, None)
+            .unwrap();
+        let mut engine = Engine::new(
+            vault,
+            &RedactSection {
+                internal_domains: Vec::new(),
+                names: NamesSection {
+                    terms: vec!["Exempla".into()],
+                    ..NamesSection::default()
+                },
+                ..RedactSection::default()
+            },
+        )
+        .unwrap();
+        engine.set_binary_mode(BinaryMode::Scan);
+        let mut utf16 = Vec::new();
+        for unit in "Exempla".encode_utf16() {
+            utf16.extend(unit.to_le_bytes());
+        }
+        assert!(!String::from_utf8_lossy(&utf16).contains("Exempla"));
+        let learned = b"prefix svcn-learned-term-0001 suffix";
+        let body = serde_json::json!({
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "application/octet-stream", "data": b64(&utf16)}},
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64(learned)}}
+            ]
+        });
+        let (out, _) = engine
+            .redact_bytes(&serde_json::to_vec(&body).unwrap())
+            .unwrap();
+        let notes = engine.take_binary_notes();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert_eq!(notes[0].kind, "image");
+        assert_eq!(notes[0].bytes, utf16.len());
+        assert_eq!(notes[1].kind, "document");
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(!rendered.contains("svcn-learned-term-0001"), "{rendered}");
+        assert!(!rendered.contains("Exempla"), "{rendered}");
     }
 
     fn widget_rule(action: Option<Action>) -> RedactSection {
