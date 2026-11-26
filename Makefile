@@ -1,4 +1,8 @@
-.PHONY: leak-test leak-streak leak-corpus
+.PHONY: leak-test leak-streak leak-corpus shellcheck
+
+# POSIX launch scripts. Requires shellcheck.
+shellcheck:
+	shellcheck -s sh -x scripts/symveil-claude scripts/symveil-grok scripts/symveil-common.sh
 
 # Builds SymVeil and runs the synthetic leak harness.
 # Exits non-zero when a gated canary reaches the mock upstream, a benign word

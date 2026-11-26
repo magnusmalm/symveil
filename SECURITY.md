@@ -22,3 +22,5 @@ If you find a way for a secret to reach the upstream model, or for the proxy to 
 ## Expectations
 
 Builtin rules are a small set, not a complete secret scanner. They do not replace scanning in CI. The proxy only sees traffic from clients that opt in by changing their base URL. It is not a TLS intercept.
+
+Request bodies with `Content-Encoding` `zstd`, `gzip`, `deflate`, or `br` are decompressed and redacted before anything is forwarded. Any other coding, more than one coding, a decode error, or a decoded body over 32 MiB is refused and is not forwarded. A compressed response is refused as well, so placeholders are not left inside compressed bytes. The launch scripts in `scripts/` exit without starting the client when the local proxy is down. Claude Code's claude.ai MCP connectors bypass the proxy unless they are disabled. The machine hostname and home-directory paths a client attaches are masked only when a configured rule matches them.

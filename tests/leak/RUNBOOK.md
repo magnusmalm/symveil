@@ -40,13 +40,25 @@ people = ["Ren Testdotter"]
 
 Confirm the mock received the request and that planted secrets are `@@sv:…@@` placeholders. If the mock records **nothing**, the client bypassed SymVeil. That is a failed check, not a pass.
 
+Grok Build sends `content-encoding: zstd` unless `GROK_REQUEST_COMPRESSION=0`. SymVeil decompresses `zstd`, `gzip`, `deflate`, and `br`, redacts the decoded JSON, and forwards plaintext. The mock should show valid JSON and `@@sv:…@@` placeholders. An unknown coding, a stacked coding, a body that does not decode, or a decoded body over 32 MiB is refused with a SymVeil HTTP error and an audit `refuse` line, and the mock stays empty. That empty mock is the proxy stopping the body. A bypass is a request that reached the mock, or the provider, without the proxy.
+
 ## 2. Claude Code
 
-Set the base URL at the proxy and leave the Anthropic SDK path without a `/v1` suffix:
+`scripts/symveil-claude` checks `GET /health` and exits without starting Claude Code when the proxy is down. It sets `ANTHROPIC_BASE_URL` to the proxy origin with no `/v1` suffix, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and `ENABLE_CLAUDEAI_MCP_SERVERS=false`, and it passes `--strict-mcp-config`. The default origin is `http://127.0.0.1:8787`. `SYMVEIL_PORT`, `SYMVEIL_HOST`, and `SYMVEIL_PROXY` change it. `SYMVEIL_PROXY` is the origin, with no `/v1` suffix. The script does not print API keys or tokens.
+
+```bash
+scripts/symveil-claude
+```
+
+The same base URL by hand, which is what the script exports:
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
 ```
+
+Claude Code's claude.ai MCP connectors call claude.ai directly. Those requests bypass SymVeil. The script turns them off. A connector left enabled is a failed check: the mock never sees that traffic.
+
+Claude Code sends the machine hostname and home-directory paths. This build masks a hostname when it is under `internal_domains`. It masks a path only where a configured term or person token appears. A machine name and a home path in the prompt can still reach the mock. That is not a gated canary.
 
 Run Claude Code in the synthetic directory on your subscription. Ask it to read `configs/fan.env`, `firmware/tundrahorn_fan.c`, and `logs/boot.log`. Also ask it to read `assets/badge.png` and `docs/manual.pdf`. Those two are sent as image and document blocks, not as text. With the default `[binary]` mode the mock should show a `[symveil: image withheld, N bytes]` note (and the same shape for a document) and should not show the file bytes. `mode = "pass"` forwards that block unchanged.
 
@@ -73,12 +85,14 @@ context_window = 128000
 supports_backend_search = false
 ```
 
-With the proxy still aimed at the mock:
+With the proxy still aimed at the mock, `scripts/symveil-grok` checks `GET /health` and exits without starting Grok Build when the proxy is down. It sets `GROK_CLI_CHAT_PROXY_BASE_URL` to `<origin>/v1`, `GROK_MODELS_LIST_URL` to `<origin>/v1/models`, and `GROK_REQUEST_COMPRESSION=0`. The compression switch stays off so the client does not send a coding the proxy has not seen. The proxy still decodes `zstd` when a request uses it. The script does not print API keys or tokens. Extra arguments are forwarded.
 
 ```bash
 export XAI_API_KEY=stand-in
-grok -p "Read configs/fan.env and firmware/tundrahorn_fan.c" -m symveil-grok
+scripts/symveil-grok -p "Read configs/fan.env and firmware/tundrahorn_fan.c" -m symveil-grok
 ```
+
+Grok Build sends the machine hostname and home-directory paths. This build masks a hostname when it is under `internal_domains`. It masks a path only where a configured term or person token appears. A machine name and a home path can still reach the mock. That is not a gated canary.
 
 Confirm the mock saw `POST /v1/responses`, the secret values were placeholders, and nothing in the capture went to `cli-chat-proxy.grok.com`. Then restart the proxy with `--openai-base https://api.x.ai` and `--anthropic-base https://api.x.ai` and repeat on the synthetic repo only.
 
@@ -86,7 +100,7 @@ Server-side tools (web search, code interpreter) run at the provider when a real
 
 ## 4. What counts as a pass
 
-A real-client pass is: the mock (and then the real upstream, if you capture it) shows no gated canary, placeholders restore in the tool output you see locally, and the title-bypass check above is clean. Configured company, project, and person names in `[redact.names]` are masked on this free build. Usernames are not. A path is masked only where a configured term or person token appears. Safe for work use still needs three consecutive clean runs and this real-client pass.
+A real-client pass is: the mock (and then the real upstream, if you capture it) shows no gated canary, placeholders restore in the tool output you see locally, and the title-bypass check above is clean. Configured company, project, and person names in `[redact.names]` are masked on this free build. Usernames are not. A path is masked only where a configured term or person token appears. The machine hostname and home-directory paths Claude Code and Grok Build attach are in that set: they reach upstream unless a configured rule matches them. Safe for work use still needs three consecutive clean runs and this real-client pass.
 
 ## 5. `symveil learn` is not part of this check
 

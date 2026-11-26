@@ -23,6 +23,15 @@ pub struct AuditEvent {
     /// Kind and length only. The bytes are not stored.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binaries: Option<Vec<BinaryAudit>>,
+    /// Set when the proxy refused to decode or forward a body. The body is not stored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
+    /// Short content-coding token for a refusal. Never the body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
+    /// HTTP status returned with a refusal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
 }
 
 #[derive(Debug, Serialize)]
@@ -128,6 +137,9 @@ impl AuditLog {
                         .collect(),
                 )
             },
+            refusal: None,
+            encoding: None,
+            status: None,
         };
         self.write(&event)
     }
@@ -143,6 +155,32 @@ impl AuditLog {
             replacements: None,
             restored: Some(restored),
             binaries: None,
+            refusal: None,
+            encoding: None,
+            status: None,
+        };
+        self.write(&event)
+    }
+
+    /// A body the proxy refused to forward. `refusal` is a short reason code.
+    /// `encoding` is a short coding token. The body is not written.
+    pub fn record_refusal(
+        &mut self,
+        path: &str,
+        refusal: &str,
+        encoding: Option<&str>,
+        status: u16,
+    ) -> Result<()> {
+        let event = AuditEvent {
+            ts: timestamp_now(),
+            dir: "refuse",
+            path: path.to_string(),
+            replacements: None,
+            restored: None,
+            binaries: None,
+            refusal: Some(refusal.to_string()),
+            encoding: encoding.map(str::to_string),
+            status: Some(status),
         };
         self.write(&event)
     }
@@ -355,6 +393,32 @@ mod tests {
         assert!(text.contains("\"disposition\":\"withheld\""), "{text}");
         assert!(!text.contains("iVBOR"), "{text}");
         assert!(!text.contains("png.author"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refusal_records_the_reason_and_not_a_body() {
+        let dir = temp_dir("audit-refuse");
+        let path = dir.join("audit.jsonl");
+        let mut log = AuditLog::open(&path).unwrap();
+        log.record_refusal(
+            "/v1/responses",
+            "unsupported-content-encoding",
+            Some("xz"),
+            415,
+        )
+        .unwrap();
+        drop(log);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"dir\":\"refuse\""), "{text}");
+        assert!(
+            text.contains("\"refusal\":\"unsupported-content-encoding\""),
+            "{text}"
+        );
+        assert!(text.contains("\"encoding\":\"xz\""), "{text}");
+        assert!(text.contains("\"status\":415"), "{text}");
+        assert!(!text.contains("replacements"), "{text}");
+        assert!(!text.contains("AKIA"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
