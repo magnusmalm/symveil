@@ -97,6 +97,9 @@ The file it writes is a list: names, extra literal rules, and allow entries. The
 ```bash
 make leak-corpus
 ./target/release/symveil learn target/leak-corpus --report
+./target/release/symveil learn target/leak-corpus
 ```
+
+The interactive prompt asks for names, then a triage of counts. `[r]edact`, `[k]eep`, `[s]kip`, and `[a]ll-in-group` decide the selected category. `[?]` explains each key. `[q]` prints what `learned.toml` will contain and saves. Secrets stay masked in the source line unless you pass `--reveal`.
 
 Unset `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, and `HTTP_PROXY` / `HTTPS_PROXY` in that process first. Learn exits if those are set. It still does not connect.

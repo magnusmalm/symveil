@@ -171,17 +171,8 @@ pub struct Candidate {
     pub files: usize,
     pub first_file: String,
     pub first_line: u32,
+    /// Source line of the first hit, so the prompt can show the value in place.
+    pub context: String,
     pub related: bool,
     pub secretish: bool,
 }
-
-pub const GROUP_ORDER: &[LearnCategory] = &[
-    LearnCategory::Secret,
-    LearnCategory::Email,
-    LearnCategory::Ip,
-    LearnCategory::Host,
-    LearnCategory::Domain,
-    LearnCategory::Name,
-    LearnCategory::Person,
-    LearnCategory::Symbol,
-];

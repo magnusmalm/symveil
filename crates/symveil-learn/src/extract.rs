@@ -48,6 +48,7 @@ struct Acc {
     files: std::collections::BTreeSet<String>,
     first_file: String,
     first_line: u32,
+    context: String,
     code_hits: u64,
     comment_hits: u64,
 }
@@ -160,6 +161,7 @@ fn finish(key: String, item: Acc) -> Option<Candidate> {
         files: item.files.len(),
         first_file: item.first_file,
         first_line: item.first_line,
+        context: item.context,
         related: false,
         secretish: item.category.secretish(),
     })
@@ -171,6 +173,7 @@ fn merge(acc: &mut HashMap<String, Acc>, file: &WalkedFile, hit: RawHit) {
     }
     let key = key_for(hit.category, &hit.text);
     let line = line_of(&file.text, hit.start);
+    let context = source_line(&file.text, hit.start, hit.end);
     let entry = acc.entry(key).or_insert_with(|| Acc {
         text: hit.text.clone(),
         category: hit.category,
@@ -179,6 +182,7 @@ fn merge(acc: &mut HashMap<String, Acc>, file: &WalkedFile, hit: RawHit) {
         files: std::collections::BTreeSet::new(),
         first_file: file.relative.clone(),
         first_line: line,
+        context: context.clone(),
         code_hits: 0,
         comment_hits: 0,
     });
@@ -193,6 +197,9 @@ fn merge(acc: &mut HashMap<String, Acc>, file: &WalkedFile, hit: RawHit) {
         entry.category = hit.category;
         entry.rule = hit.rule;
         entry.text = hit.text;
+        entry.context = context;
+        entry.first_file = file.relative.clone();
+        entry.first_line = line;
     }
 }
 
@@ -679,6 +686,52 @@ fn text_slice(text: &str, start: usize, end: usize) -> &str {
     } else {
         ""
     }
+}
+
+fn source_line(text: &str, start: usize, end: usize) -> String {
+    if text.is_empty() || start > text.len() {
+        return String::new();
+    }
+    let start = floor_boundary(text, start);
+    let line_start = text[..start]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let line_end = text[start..]
+        .find('\n')
+        .map(|index| start + index)
+        .unwrap_or(text.len());
+    let line = &text[line_start..line_end];
+    if line.chars().count() <= 240 {
+        return line.to_string();
+    }
+    let value = text.get(start..end.min(text.len())).unwrap_or("");
+    let Some(pos) = line.find(value) else {
+        return line.chars().take(240).collect();
+    };
+    let from = floor_boundary(line, pos.saturating_sub(60));
+    let to = ceil_boundary(line, (pos + value.len() + 60).min(line.len()));
+    line[from..to].to_string()
+}
+
+fn floor_boundary(text: &str, mut index: usize) -> usize {
+    if index > text.len() {
+        index = text.len();
+    }
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn ceil_boundary(text: &str, mut index: usize) -> usize {
+    if index > text.len() {
+        return text.len();
+    }
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
 }
 
 fn line_of(text: &str, start: usize) -> u32 {
