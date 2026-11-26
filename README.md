@@ -106,6 +106,38 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
 
 Override the upstream origin with `--openai-base` or `--anthropic-base` (no trailing `/v1`). `GET /health` returns `{"status":"ok"}`.
 
+## Launch scripts
+
+`scripts/symveil-claude` and `scripts/symveil-grok` start the client only after `GET /health` on the local proxy returns `{"status":"ok"}`. If that check fails, or `curl` cannot read the URL, the script exits and does not start the client. The scripts do not print API keys or tokens.
+
+The origin defaults to `http://127.0.0.1:8787`. `SYMVEIL_HOST` and `SYMVEIL_PORT` change the host and port. `SYMVEIL_PROXY` sets the origin in one value. It has no `/v1` suffix.
+
+```bash
+scripts/symveil-claude
+scripts/symveil-grok -p "Explain this repo."
+SYMVEIL_PORT=8790 scripts/symveil-claude
+```
+
+`scripts/symveil-claude` sets `ANTHROPIC_BASE_URL` to that origin, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and `ENABLE_CLAUDEAI_MCP_SERVERS=false`, and it passes `--strict-mcp-config`. Extra arguments are forwarded to `claude`.
+
+Claude Code can also load claude.ai MCP connectors. Those calls go to claude.ai and bypass SymVeil. The script turns the connectors off. Leaving one enabled sends that traffic around the proxy.
+
+`scripts/symveil-grok` sets `GROK_CLI_CHAT_PROXY_BASE_URL` to `<origin>/v1`, `GROK_MODELS_LIST_URL` to `<origin>/v1/models`, and `GROK_REQUEST_COMPRESSION=0`. Extra arguments are forwarded to `grok`. Compression stays off in the client so a coding the proxy does not know is not sent. The proxy still accepts `zstd`, `gzip`, `deflate`, and `br` when a request uses them. See [Compressed bodies](#compressed-bodies).
+
+Claude Code and Grok Build include the machine hostname and home-directory paths in the request. This build masks a hostname when it is under `internal_domains`. It masks a path only where a configured term or person token appears. A machine name and a home path can still reach upstream.
+
+SymVeil redacts traffic that goes through the proxy. The agent can still read files and run tools on the machine.
+
+## Compressed bodies
+
+A request may arrive with `Content-Encoding` set to `zstd`, `gzip`, `deflate`, or `br` (one coding, any case). SymVeil decompresses it, with a decoded-size cap of 32 MiB, the same cap as the raw body, then runs the usual redaction and binary-block handling on the decoded bytes. A zstd frame that asks for a window larger than 32 MiB is refused. `deflate` is the zlib wrapper from RFC 1950.
+
+The upstream request is the redacted plaintext. `Content-Encoding` is removed and `Content-Length` is the length of that body. The plaintext is what the upstream parser sees. A second compression step would be another place for the body and the header to disagree.
+
+`identity`, a missing header, and an empty body stay as they are. Any other coding, more than one coding, a parameter on the coding, a decode error, or a decoded body over 32 MiB is refused. Nothing is sent upstream. The client gets HTTP 415 (unsupported or stacked coding), 400 (decode error), or 413 (over the cap). The body is a SymVeil error (`type` is `symveil_error`). The audit log gets one `refuse` line with the reason, the status, and a short coding token. It does not get the body.
+
+`Accept-Encoding` is not forwarded, and the HTTP client is built without transparent gzip, brotli, or zstd. A normal upstream reply is uncompressed, and placeholders in that plaintext are restored, including a streamed server-sent event. If a response still carries a `Content-Encoding` other than `identity` (including a coding this proxy knows how to decode, more than one coding, or a header that is not text), SymVeil returns 502 and does not forward the body. Compressed SSE and JSON are not decompressed on the way back: placeholders inside those bytes would stay placeholders. The closed failure is to drop the body. The audit line uses `"refusal":"compressed-response"`.
+
 ## Grok Build
 
 Checked with Grok Build 1.0.52 (`grok`) and a local mock upstream that recorded every request and returned a streaming reply, including a `run_terminal_command` tool call. Testing was against that mock. It was not run against `https://api.x.ai`.
@@ -164,6 +196,8 @@ grok -p "Explain this repo." -m symveil-grok
 ```
 
 Grok requires `XAI_API_KEY` for that model list and for API-key inference. The check used a stand-in key. The mock received `Authorization: Bearer` on all three backends, and `anthropic-version: 2023-06-01` on `messages`.
+
+`scripts/symveil-grok` is the launch path for this check. It points `GROK_CLI_CHAT_PROXY_BASE_URL` and `GROK_MODELS_LIST_URL` at the proxy and sets `GROK_REQUEST_COMPRESSION=0`. The custom `base_url` in `config.toml` is the other way to send the chat request through SymVeil. The script still refuses to start `grok` when `GET /health` fails.
 
 Two environment variables were checked on their own, without relying on the custom `base_url`:
 
@@ -300,6 +334,7 @@ Point the proxy at a non-default file with `learned = "learned.toml"` under `[re
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+shellcheck -s sh -x scripts/symveil-claude scripts/symveil-grok scripts/symveil-common.sh
 make leak-test
 make leak-streak
 ```

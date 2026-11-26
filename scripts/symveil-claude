@@ -1,0 +1,25 @@
+#!/bin/sh
+# Start Claude Code through a local SymVeil proxy.
+# Exits without starting the client when the proxy health check fails.
+# Does not print API keys or tokens.
+#
+# Sets ANTHROPIC_BASE_URL to the proxy origin (no /v1 suffix),
+# CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1, and
+# ENABLE_CLAUDEAI_MCP_SERVERS=false, then passes --strict-mcp-config.
+# claude.ai MCP connectors talk to claude.ai directly unless those are set.
+# Remaining arguments are forwarded to claude.
+#
+# SYMVEIL_HOST and SYMVEIL_PORT default to 127.0.0.1 and 8787.
+# SYMVEIL_PROXY sets the origin in one value and has no /v1 suffix.
+set -eu
+
+script_dir=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd) || exit 1
+# shellcheck source=scripts/symveil-common.sh
+. "${script_dir}/symveil-common.sh"
+symveil_prepare
+
+export ANTHROPIC_BASE_URL="${symveil_proxy}"
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+export ENABLE_CLAUDEAI_MCP_SERVERS=false
+
+exec claude --strict-mcp-config "$@"

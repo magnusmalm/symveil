@@ -12,10 +12,16 @@ anyhow = "1"
 async-stream = "0.3"
 axum = "0.7"
 base64 = "0.22"
+brotli = "7"
 bytes = "1"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 futures = "0.3"
+http = "1"
 keyring = "4.2"
 regex = "1"
+# No gzip, brotli, or zstd features: a compressed response must stay
+# compressed so the proxy can refuse it. Transparent decompression would
+# hide Content-Encoding and skip that check.
 reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -25,6 +31,7 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"]
 toml = "0.8"
 tracing = "0.1"
 zeroize = "1"
+zstd = "0.13"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

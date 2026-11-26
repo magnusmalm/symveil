@@ -11,7 +11,7 @@ use axum::Router;
 use bytes::Bytes;
 use symveil::audit::AuditLog;
 use symveil::build_engine;
-use symveil::config::{PiiSection, RedactSection};
+use symveil::config::{NamesSection, PiiSection, RedactSection};
 use symveil::proxy::AppState;
 use symveil::vault::Vault;
 use tokio::net::TcpListener;
@@ -23,6 +23,7 @@ struct MockState {
     body: Arc<Vec<u8>>,
     echo: bool,
     chunk: usize,
+    response_encoding: Option<String>,
 }
 
 struct Recorded {
@@ -31,6 +32,8 @@ struct Recorded {
     authorization: Option<String>,
     api_key: Option<String>,
     accept_encoding: Option<String>,
+    content_encoding: Option<String>,
+    content_length: Option<String>,
 }
 
 #[tokio::test]
@@ -348,11 +351,15 @@ fn assert_restored(body: &str, secrets: &[&str], keepers: &[&str]) {
 }
 
 async fn spawn_echo(sse: bool) -> (String, Arc<Mutex<Vec<Recorded>>>) {
-    spawn_mock_inner(Vec::new(), sse, true, 7).await
+    spawn_mock_inner(Vec::new(), sse, true, 7, None).await
 }
 
 async fn spawn_mock(body: Vec<u8>, sse: bool) -> (String, Arc<Mutex<Vec<Recorded>>>) {
-    spawn_mock_inner(body, sse, false, 1).await
+    spawn_mock_inner(body, sse, false, 1, None).await
+}
+
+async fn spawn_encoded(body: Vec<u8>, encoding: &str) -> (String, Arc<Mutex<Vec<Recorded>>>) {
+    spawn_mock_inner(body, false, false, 1, Some(encoding.to_string())).await
 }
 
 async fn spawn_mock_inner(
@@ -360,6 +367,7 @@ async fn spawn_mock_inner(
     sse: bool,
     echo: bool,
     chunk: usize,
+    response_encoding: Option<String>,
 ) -> (String, Arc<Mutex<Vec<Recorded>>>) {
     let hits = Arc::new(Mutex::new(Vec::new()));
     let state = MockState {
@@ -368,6 +376,7 @@ async fn spawn_mock_inner(
         body: Arc::new(body),
         echo,
         chunk,
+        response_encoding,
     };
     let app = Router::new().fallback(any(mock_handler)).with_state(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -381,34 +390,48 @@ async fn spawn_mock_inner(
 async fn mock_handler(State(state): State<MockState>, req: Request<Body>) -> Response {
     let path = req.uri().path().to_string();
     let headers = req.headers().clone();
-    let body = axum::body::to_bytes(req.into_body(), 1024 * 1024)
+    // Record the arrival before reading the body so a forwarded bomb still
+    // counts when the read fails.
+    let slot = {
+        let mut hits = state.hits.lock().unwrap();
+        hits.push(Recorded {
+            path,
+            body: Vec::new(),
+            authorization: header_string(&headers, "authorization"),
+            api_key: header_string(&headers, "x-api-key"),
+            accept_encoding: header_string(&headers, "accept-encoding"),
+            content_encoding: header_string(&headers, "content-encoding"),
+            content_length: header_string(&headers, "content-length"),
+        });
+        hits.len() - 1
+    };
+    let body = axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024)
         .await
-        .unwrap();
-    state.hits.lock().unwrap().push(Recorded {
-        path,
-        body: body.to_vec(),
-        authorization: header_string(&headers, "authorization"),
-        api_key: header_string(&headers, "x-api-key"),
-        accept_encoding: header_string(&headers, "accept-encoding"),
-    });
+        .unwrap_or_default();
+    if let Some(hit) = state.hits.lock().unwrap().get_mut(slot) {
+        hit.body = body.to_vec();
+    }
     let payload = if state.echo {
         body.to_vec()
     } else {
         (*state.body).clone()
     };
+    let content_type = if state.sse {
+        "text/event-stream"
+    } else {
+        "application/json"
+    };
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", content_type);
+    if let Some(encoding) = &state.response_encoding {
+        builder = builder.header("content-encoding", encoding.as_str());
+    }
     if state.sse {
         let chunks = stream_chunks(payload, state.chunk.max(1));
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/event-stream")
-            .body(Body::from_stream(chunks))
-            .unwrap()
+        builder.body(Body::from_stream(chunks)).unwrap()
     } else {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "application/json")
-            .body(Body::from(payload))
-            .unwrap()
+        builder.body(Body::from(payload)).unwrap()
     }
 }
 
@@ -1056,4 +1079,296 @@ fn content_of(body: &[u8]) -> String {
         .as_str()
         .unwrap()
         .to_string()
+}
+
+fn seed_value(id: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/leak/seed.json");
+    let seed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let item = seed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"].as_str() == Some(id))
+        .unwrap_or_else(|| panic!("seed item {id} missing"));
+    assert_eq!(
+        item["expect"].as_str(),
+        Some("masked"),
+        "{id} is no longer a masked seed"
+    );
+    item["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("seed item {id} has no string value"))
+        .to_string()
+}
+
+fn seeded_request() -> (Vec<u8>, String, String, String) {
+    let exempla = seed_value("company-exempla");
+    let tundrahorn = seed_value("company-tundrahorn");
+    let aws = seed_value("aws-access-key");
+    let payload = serde_json::json!({
+        "model": "grok-test",
+        "input": format!("{exempla} builds {tundrahorn} fläkt {aws}"),
+    });
+    (
+        serde_json::to_vec(&payload).unwrap(),
+        exempla,
+        tundrahorn,
+        aws,
+    )
+}
+
+fn gzip_bytes(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    enc.write_all(data).unwrap();
+    enc.finish().unwrap()
+}
+
+fn zstd_bytes(data: &[u8]) -> Vec<u8> {
+    zstd::bulk::compress(data, 3).unwrap()
+}
+
+fn gzip_zeros(len: usize) -> Vec<u8> {
+    use std::io::Write;
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    let chunk = [0u8; 8192];
+    let mut left = len;
+    while left > 0 {
+        let n = left.min(chunk.len());
+        enc.write_all(&chunk[..n]).unwrap();
+        left -= n;
+    }
+    enc.finish().unwrap()
+}
+
+struct Upstream {
+    proxy: String,
+    hits: Arc<Mutex<Vec<Recorded>>>,
+    audit_path: std::path::PathBuf,
+    dir: std::path::PathBuf,
+}
+
+async fn seed_upstream() -> Upstream {
+    let exempla = seed_value("company-exempla");
+    let tundrahorn = seed_value("company-tundrahorn");
+    let redact = RedactSection {
+        internal_domains: Vec::new(),
+        names: NamesSection {
+            terms: vec![exempla, tundrahorn],
+            ..NamesSection::default()
+        },
+        ..RedactSection::default()
+    };
+    let engine = build_engine(Vault::ephemeral(), &redact).unwrap();
+    let (upstream, hits) = spawn_mock(b"{}".to_vec(), false).await;
+    let dir = temp_dir("audit-encoding");
+    let audit_path = dir.join("audit.jsonl");
+    let state = AppState::new(
+        engine,
+        upstream.clone(),
+        upstream,
+        AuditLog::open(&audit_path).unwrap(),
+        30,
+    )
+    .unwrap();
+    let proxy = spawn_proxy(state).await;
+    Upstream {
+        proxy,
+        hits,
+        audit_path,
+        dir,
+    }
+}
+
+async fn post_encoded(proxy: &str, encoding: &str, body: Vec<u8>) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("{proxy}/v1/responses"))
+        .header("authorization", "Bearer test-token")
+        .header("content-type", "application/json")
+        .header("content-encoding", encoding)
+        .body(body)
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn assert_compressed_is_masked(encoding: &str, compress: fn(&[u8]) -> Vec<u8>) {
+    let (plain, exempla, tundrahorn, aws) = seeded_request();
+    let compressed = compress(&plain);
+    assert_ne!(compressed, plain);
+    let upstream = seed_upstream().await;
+    let response = post_encoded(&upstream.proxy, encoding, compressed).await;
+    assert_eq!(response.status(), 200);
+    let count: usize = response
+        .headers()
+        .get("x-symveil-redactions")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(count >= 3, "redactions={count}");
+
+    let seen = upstream.hits.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert!(
+        seen[0].content_encoding.is_none(),
+        "{:?}",
+        seen[0].content_encoding
+    );
+    let length: usize = seen[0]
+        .content_length
+        .as_deref()
+        .unwrap_or_else(|| panic!("missing content-length"))
+        .parse()
+        .unwrap();
+    assert_eq!(length, seen[0].body.len());
+    assert_ne!(&seen[0].body[..2.min(seen[0].body.len())], b"\x1f\x8b");
+    assert!(
+        seen[0].body.len() < 4 || &seen[0].body[..4] != b"\x28\xb5\x2f\xfd",
+        "forwarded body is still zstd"
+    );
+    let forwarded: serde_json::Value = serde_json::from_slice(&seen[0].body).unwrap();
+    let input = forwarded["input"].as_str().unwrap();
+    assert!(input.contains("fläkt"), "{input}");
+    assert!(input.contains("builds"), "{input}");
+    assert!(!input.contains(&exempla), "{input}");
+    assert!(!input.contains(&tundrahorn), "{input}");
+    assert!(!input.contains(&aws), "{input}");
+    assert!(input.contains("@@sv:"), "{input}");
+    let raw = String::from_utf8_lossy(&seen[0].body);
+    assert!(!raw.contains(&exempla), "{raw}");
+    assert!(!raw.contains(&tundrahorn), "{raw}");
+    assert!(!raw.contains(&aws), "{raw}");
+    assert_eq!(seen[0].authorization.as_deref(), Some("Bearer test-token"));
+
+    let audit = std::fs::read_to_string(&upstream.audit_path).unwrap();
+    assert!(audit.contains("aws-access-key-id"), "{audit}");
+    assert!(audit.contains("name-term"), "{audit}");
+    assert!(!audit.contains(&aws), "{audit}");
+    assert!(!audit.contains("\"dir\":\"refuse\""), "{audit}");
+    drop(seen);
+    let _ = std::fs::remove_dir_all(&upstream.dir);
+}
+
+#[tokio::test]
+async fn zstd_request_reaches_upstream_masked_and_valid() {
+    assert_compressed_is_masked("zstd", zstd_bytes).await;
+}
+
+#[tokio::test]
+async fn gzip_request_reaches_upstream_masked_and_valid() {
+    assert_compressed_is_masked("gzip", gzip_bytes).await;
+}
+
+async fn assert_refused(encoding: &str, body: Vec<u8>, status: u16, reason: &str) {
+    let aws = seed_value("aws-access-key");
+    let exempla = seed_value("company-exempla");
+    let upstream = seed_upstream().await;
+    let response = post_encoded(&upstream.proxy, encoding, body).await;
+    assert_eq!(response.status().as_u16(), status);
+    let text = response.text().await.unwrap();
+    assert!(text.contains("symveil_error"), "{text}");
+    assert!(text.contains("symveil refused"), "{text}");
+    assert!(!text.contains(&aws), "{text}");
+    assert!(!text.contains(&exempla), "{text}");
+    assert!(upstream.hits.lock().unwrap().is_empty());
+    let audit = std::fs::read_to_string(&upstream.audit_path).unwrap();
+    assert!(audit.contains("\"dir\":\"refuse\""), "{audit}");
+    assert!(audit.contains(reason), "{audit}");
+    assert!(audit.contains(&format!("\"status\":{status}")), "{audit}");
+    assert!(!audit.contains(&aws), "{audit}");
+    assert!(!audit.contains(&exempla), "{audit}");
+    assert!(audit.len() < 4096, "audit line looks like it stored a body");
+    let _ = std::fs::remove_dir_all(&upstream.dir);
+}
+
+#[tokio::test]
+async fn corrupt_zstd_is_rejected_and_not_forwarded() {
+    let aws = seed_value("aws-access-key");
+    let mut body = aws.into_bytes();
+    body.extend_from_slice(b" not-a-zstd-frame Exempla");
+    assert_refused("zstd", body, 400, "content-encoding-decode").await;
+}
+
+#[tokio::test]
+async fn unknown_encoding_is_rejected_and_not_forwarded() {
+    let (plain, _, _, _) = seeded_request();
+    assert_refused("xz", plain, 415, "unsupported-content-encoding").await;
+}
+
+#[tokio::test]
+async fn stacked_encoding_is_rejected_and_not_forwarded() {
+    let (plain, _, _, _) = seeded_request();
+    assert_refused(
+        "gzip, zstd",
+        gzip_bytes(&plain),
+        415,
+        "stacked-content-encoding",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn decompression_bomb_is_rejected_and_not_forwarded() {
+    const {
+        assert!(
+            symveil::proxy::MAX_BODY >= 32 * 1024 * 1024,
+            "decoded body cap dropped below 32 MiB"
+        );
+    };
+    let bomb = gzip_zeros(symveil::proxy::MAX_BODY + 1);
+    assert!(
+        bomb.len() * 10 < symveil::proxy::MAX_BODY,
+        "fixture is not a bomb: {} bytes on the wire",
+        bomb.len()
+    );
+    assert!(bomb.len() < symveil::proxy::MAX_BODY);
+    assert_refused("gzip", bomb, 413, "decompressed-body-too-large").await;
+}
+
+#[tokio::test]
+async fn compressed_upstream_response_is_not_forwarded_unrestored() {
+    let aws = seed_value("aws-access-key");
+    let payload = serde_json::json!({ "text": format!("{aws} @@sv:0123abcd@@") });
+    let compressed = gzip_bytes(&serde_json::to_vec(&payload).unwrap());
+    let (upstream, hits) = spawn_encoded(compressed, "gzip").await;
+    let redact = RedactSection {
+        internal_domains: Vec::new(),
+        ..RedactSection::default()
+    };
+    let dir = temp_dir("audit-compressed-response");
+    let audit_path = dir.join("audit.jsonl");
+    let state = AppState::new(
+        build_engine(Vault::ephemeral(), &redact).unwrap(),
+        upstream.clone(),
+        upstream,
+        AuditLog::open(&audit_path).unwrap(),
+        30,
+    )
+    .unwrap();
+    let proxy = spawn_proxy(state).await;
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/v1/responses"))
+        .header("content-type", "application/json")
+        .body(r#"{"model":"grok-test","input":"hello"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 502);
+    let bytes = response.bytes().await.unwrap();
+    assert_ne!(&bytes[..2.min(bytes.len())], b"\x1f\x8b");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("symveil_error"), "{text}");
+    assert!(text.contains("compressed body"), "{text}");
+    assert!(!text.contains(&aws), "{text}");
+    assert!(!text.contains("@@sv:"), "{text}");
+    assert_eq!(hits.lock().unwrap().len(), 1);
+    let audit = std::fs::read_to_string(&audit_path).unwrap();
+    assert!(audit.contains("\"dir\":\"refuse\""), "{audit}");
+    assert!(audit.contains("compressed-response"), "{audit}");
+    assert!(audit.contains("\"encoding\":\"gzip\""), "{audit}");
+    assert!(!audit.contains(&aws), "{audit}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

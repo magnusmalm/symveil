@@ -1,0 +1,25 @@
+#!/bin/sh
+# Start Grok Build through a local SymVeil proxy.
+# Exits without starting the client when the proxy health check fails.
+# Does not print API keys or tokens.
+#
+# Sets GROK_CLI_CHAT_PROXY_BASE_URL to <origin>/v1,
+# GROK_MODELS_LIST_URL to <origin>/v1/models, and GROK_REQUEST_COMPRESSION=0.
+# Compression stays off in the client so an encoding the proxy does not know
+# is not sent. The proxy still decodes zstd, gzip, deflate, and br.
+# Remaining arguments are forwarded to grok.
+#
+# SYMVEIL_HOST and SYMVEIL_PORT default to 127.0.0.1 and 8787.
+# SYMVEIL_PROXY sets the origin in one value and has no /v1 suffix.
+set -eu
+
+script_dir=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd) || exit 1
+# shellcheck source=scripts/symveil-common.sh
+. "${script_dir}/symveil-common.sh"
+symveil_prepare
+
+export GROK_CLI_CHAT_PROXY_BASE_URL="${symveil_proxy}/v1"
+export GROK_MODELS_LIST_URL="${symveil_proxy}/v1/models"
+export GROK_REQUEST_COMPRESSION=0
+
+exec grok "$@"

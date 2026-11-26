@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod binary;
+mod encoding;
 mod keystore;
 mod perms;
 mod seal;

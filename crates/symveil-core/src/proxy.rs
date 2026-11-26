@@ -17,7 +17,10 @@ use crate::config::Action;
 use crate::redact::{self, Engine};
 use crate::stream::{ByteRestorer, SseRestorer};
 
-const MAX_BODY: usize = 32 * 1024 * 1024;
+/// Cap for the on-wire request body and for a decoded request body.
+/// A compressed body can be small on the wire and still be refused when the
+/// decoded bytes would pass this size.
+pub const MAX_BODY: usize = 32 * 1024 * 1024;
 
 const HOP: &[&str] = &[
     "connection",
@@ -98,6 +101,8 @@ pub fn router(state: AppState) -> Router {
 }
 
 pub fn build_client(timeout_secs: u64) -> Result<reqwest::Client> {
+    // gzip/brotli/zstd features stay off. A compressed upstream body has to
+    // remain compressed so the Content-Encoding check below can refuse it.
     let mut builder =
         reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(15));
     if timeout_secs > 0 {
@@ -141,11 +146,19 @@ async fn proxy_request(State(state): State<AppState>, req: Request<Body>) -> Res
             return error_response(status, &format!("read request body: {message}"));
         }
     };
-    let wants_stream = request_wants_stream(&body);
+    // Decode first. Redaction runs on the plaintext, and a failure here
+    // returns before the upstream client is used.
+    let prepared = match crate::encoding::prepare_request(&headers, &body[..], MAX_BODY) {
+        Ok(prepared) => prepared,
+        Err(reject) => return refuse_request(&state, &path, &reject),
+    };
+    let request_encoding = prepared.coding;
+    let decoded = prepared.body;
+    let wants_stream = request_wants_stream(&decoded);
 
     let (redacted, hits, map, binaries) = {
         let mut engine = state.engine.lock().unwrap_or_else(|err| err.into_inner());
-        let redacted = match engine.redact_bytes(&body) {
+        let redacted = match engine.redact_bytes(&decoded) {
             Ok(pair) => pair,
             Err(err) => return error_response(StatusCode::BAD_REQUEST, &format!("redact: {err}")),
         };
@@ -216,14 +229,13 @@ async fn proxy_request(State(state): State<AppState>, req: Request<Body>) -> Res
         }
     };
 
-    if let Some(encoding) = upstream.headers().get(reqwest::header::CONTENT_ENCODING) {
-        let encoding = encoding.to_str().unwrap_or("").to_ascii_lowercase();
-        if !encoding.is_empty() && encoding != "identity" {
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                "upstream sent a compressed body; symveil refused to forward it unrestored",
-            );
-        }
+    if let Some(label) = crate::encoding::compressed_response(upstream.headers()) {
+        tracing::warn!(
+            path = %path,
+            encoding = %label,
+            "upstream sent a compressed body"
+        );
+        return refuse_response(&state, &path, &label);
     }
 
     let status =
@@ -242,6 +254,7 @@ async fn proxy_request(State(state): State<AppState>, req: Request<Body>) -> Res
         binaries = binaries.len(),
         streaming,
         status = status.as_u16(),
+        request_encoding = request_encoding,
         "proxied"
     );
 
@@ -396,7 +409,9 @@ fn is_hop(name: &str) -> bool {
 fn forward_headers(headers: &HeaderMap) -> reqwest::header::HeaderMap {
     let mut out = reqwest::header::HeaderMap::new();
     for (name, value) in headers.iter() {
-        if is_hop(name.as_str()) {
+        // Content-Encoding described the client body. The buffer we send is
+        // the redacted plaintext, and reqwest sets Content-Length from it.
+        if is_hop(name.as_str()) || name.as_str().eq_ignore_ascii_case("content-encoding") {
             continue;
         }
         let Ok(name) = reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes()) else {
@@ -408,6 +423,58 @@ fn forward_headers(headers: &HeaderMap) -> reqwest::header::HeaderMap {
         out.append(name, value);
     }
     out
+}
+
+fn refuse_request(state: &AppState, path: &str, reject: &crate::encoding::Reject) -> Response {
+    let status = reject.status();
+    record_refusal(
+        state,
+        path,
+        status.as_u16(),
+        reject.reason(),
+        reject.encoding(),
+    );
+    error_response(status, &reject.message())
+}
+
+fn refuse_response(state: &AppState, path: &str, encoding: &str) -> Response {
+    let status = StatusCode::BAD_GATEWAY;
+    record_refusal(
+        state,
+        path,
+        status.as_u16(),
+        "compressed-response",
+        Some(encoding),
+    );
+    error_response(
+        status,
+        "upstream sent a compressed body; symveil refused to forward it unrestored",
+    )
+}
+
+fn record_refusal(
+    state: &AppState,
+    path: &str,
+    status: u16,
+    refusal: &str,
+    encoding: Option<&str>,
+) {
+    let write = |audit: &mut AuditLog| {
+        if let Err(err) = audit.record_refusal(path, refusal, encoding, status) {
+            tracing::warn!("audit log: {err}");
+        }
+    };
+    match state.audit.lock() {
+        Ok(mut audit) => write(&mut audit),
+        Err(poisoned) => write(&mut poisoned.into_inner()),
+    }
+    tracing::warn!(
+        path = %path,
+        refusal,
+        encoding = encoding.unwrap_or(""),
+        status,
+        "body refused"
+    );
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response {
