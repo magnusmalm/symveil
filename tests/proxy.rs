@@ -219,6 +219,7 @@ API_KEY=${{OTHER_API_KEY}}
         url_password,
         signature,
         service,
+        "db.example",
     ];
     let keepers = [
         "OPENAI_API_KEY",
@@ -228,8 +229,6 @@ API_KEY=${{OTHER_API_KEY}}
         "DATABASE_URL",
         "AUTH_TOKEN",
         "SERVICE_TOKEN",
-        "postgres://app:",
-        "@db.example/app",
         "# rotated",
         "TOKEN_LIMIT=4096",
         "MAX_TOKEN=12345678",
@@ -323,7 +322,7 @@ API_KEY=${{OTHER_API_KEY}}
         "openai-api-key",
         "anthropic-api-key",
         "jwt",
-        "url-password",
+        "dotenv-assignment",
         "env-assignment",
         "env-quoted-assignment",
     ] {
@@ -348,6 +347,194 @@ fn assert_restored(body: &str, secrets: &[&str], keepers: &[&str]) {
     for keeper in keepers {
         assert!(body.contains(keeper), "missing {keeper} in {body}");
     }
+}
+
+/// Five synthetic values from `tests/fixtures/dotenv-repo/.env`.
+/// SymVeil does not stop the read. This counts how many of those values the
+/// proxy still forwards.
+struct DotenvFixture {
+    raw: String,
+    numbered: String,
+    secrets: Vec<String>,
+}
+
+fn dotenv_fixture() -> DotenvFixture {
+    let raw = include_str!("fixtures/dotenv-repo/.env").to_string();
+    let numbered = raw
+        .lines()
+        .enumerate()
+        .map(|(index, line)| format!("{:>6}|{line}", index + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let secrets = [
+        "sk-Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1",
+        "ghp_cD1cD1cD1cD1cD1cD1cD1cD1cD1cD1cD1cD1",
+        "n0t-a-token-db-pass",
+        "db-url-password",
+        "s3ssion-value-9f3a",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    DotenvFixture {
+        raw,
+        numbered,
+        secrets,
+    }
+}
+
+fn leaked_secrets(body: &str, secrets: &[String]) -> Vec<String> {
+    secrets
+        .iter()
+        .filter(|secret| body.contains(secret.as_str()))
+        .cloned()
+        .collect()
+}
+
+#[tokio::test]
+async fn dotenv_file_values_do_not_reach_upstream() {
+    let fixture = dotenv_fixture();
+    let quoted = format!("contents of /repo/.env:\n{}", fixture.raw);
+    let redact = RedactSection {
+        internal_domains: Vec::new(),
+        ..RedactSection::default()
+    };
+    let engine = build_engine(Vault::ephemeral(), &redact).unwrap();
+    let (openai, openai_hits) = spawn_echo(false).await;
+    let (anthropic_base, anthropic_hits) = spawn_echo(false).await;
+    let dir = temp_dir("dotenv-leak");
+    let state = AppState::new(
+        engine,
+        openai,
+        anthropic_base,
+        AuditLog::open(&dir.join("audit.jsonl")).unwrap(),
+        30,
+    )
+    .unwrap();
+    let proxy = spawn_proxy(state).await;
+    let client = reqwest::Client::new();
+
+    let shapes = [
+        (
+            "anthropic-messages",
+            "/v1/messages",
+            true,
+            serde_json::json!({
+                "model": "claude-test",
+                "max_tokens": 16,
+                "messages": [
+                    {"role": "user", "content": "Read /repo/.env"},
+                    {"role": "assistant", "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_env",
+                        "name": "Read",
+                        "input": {"file_path": "/repo/.env"}
+                    }]},
+                    {"role": "user", "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_env",
+                            "content": fixture.numbered
+                        },
+                        {"type": "text", "text": quoted}
+                    ]}
+                ]
+            }),
+        ),
+        (
+            "openai-chat",
+            "/v1/chat/completions",
+            false,
+            serde_json::json!({
+                "model": "gpt-test",
+                "messages": [
+                    {"role": "user", "content": quoted},
+                    {"role": "assistant", "tool_calls": [{
+                        "id": "call_env",
+                        "type": "function",
+                        "function": {
+                            "name": "Read",
+                            "arguments": "{\"file_path\":\"/repo/.env\"}"
+                        }
+                    }]},
+                    {"role": "tool", "tool_call_id": "call_env", "content": fixture.numbered}
+                ]
+            }),
+        ),
+        (
+            "openai-responses",
+            "/v1/responses",
+            false,
+            serde_json::json!({
+                "model": "gpt-test",
+                "input": [
+                    {"role": "user", "content": quoted},
+                    {
+                        "type": "function_call",
+                        "name": "Read",
+                        "call_id": "call_env",
+                        "arguments": "{\"file_path\":\"/repo/.env\"}"
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_env",
+                        "output": fixture.numbered
+                    }
+                ]
+            }),
+        ),
+    ];
+
+    let mut leaks = Vec::new();
+    for (name, path, anthropic, body) in shapes {
+        let request = client
+            .post(format!("{proxy}{path}"))
+            .header("content-type", "application/json");
+        let request = if anthropic {
+            request.header("x-api-key", "sk-ant-test")
+        } else {
+            request.header("authorization", "Bearer test")
+        };
+        let response = request.body(body.to_string()).send().await.unwrap();
+        assert_eq!(response.status(), 200, "{name}");
+        let restored = response.text().await.unwrap();
+        for secret in &fixture.secrets {
+            assert!(restored.contains(secret), "{name} did not restore {secret}");
+        }
+        assert!(restored.contains("TOKEN_LIMIT=4096"), "{name}");
+        let hits = if anthropic {
+            anthropic_hits.lock().unwrap()
+        } else {
+            openai_hits.lock().unwrap()
+        };
+        let seen = hits
+            .iter()
+            .rev()
+            .find(|hit| hit.path == path)
+            .unwrap_or_else(|| panic!("{name} did not reach upstream"));
+        let forwarded = String::from_utf8_lossy(&seen.body);
+        let leaked = leaked_secrets(&forwarded, &fixture.secrets);
+        let host_left = forwarded.contains("db.internal.example");
+        leaks.push(format!(
+            "{name}: {} of 5: {leaked:?}; host_left={host_left}",
+            leaked.len()
+        ));
+        assert!(forwarded.contains("OPENAI_API_KEY"), "{name}");
+        assert!(forwarded.contains("SESSION_COOKIE"), "{name}");
+        assert!(forwarded.contains("PGPASSWORD"), "{name}");
+        assert!(forwarded.contains("DATABASE_URL"), "{name}");
+        assert!(forwarded.contains("GITHUB_PAT"), "{name}");
+        assert!(forwarded.contains("TOKEN_LIMIT=4096"), "{name}");
+        drop(hits);
+    }
+    assert!(
+        leaks
+            .iter()
+            .all(|line| line.contains("0 of 5") && line.contains("host_left=false")),
+        "secret values reached upstream:\n{}",
+        leaks.join("\n")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 async fn spawn_echo(sse: bool) -> (String, Arc<Mutex<Vec<Recorded>>>) {

@@ -40,6 +40,10 @@ fn default_audit_buffered() -> bool {
     false
 }
 
+fn default_dotenv() -> bool {
+    true
+}
+
 fn default_vault() -> String {
     ".symveil/vault.json".to_string()
 }
@@ -348,6 +352,10 @@ pub struct RedactSection {
     /// mixed base64 blobs that are not credentials still match.
     #[serde(default)]
     pub high_entropy: bool,
+    /// Redact every assignment value in dotenv-shaped text. On by default.
+    /// Set false to keep only the suffix rules and the known token shapes.
+    #[serde(default = "default_dotenv")]
+    pub dotenv: bool,
     #[serde(default)]
     pub pii: PiiSection,
     /// Company, product, project, and person names. Empty leaves names untouched.
@@ -371,6 +379,7 @@ impl Default for RedactSection {
             patterns: Vec::new(),
             secrets: Vec::new(),
             high_entropy: false,
+            dotenv: true,
             pii: PiiSection::default(),
             names: NamesSection::default(),
             learned: None,
@@ -784,6 +793,15 @@ mod tests {
     }
 
     #[test]
+    fn dotenv_is_on_unless_the_config_turns_it_off() {
+        assert!(RedactSection::default().dotenv);
+        let omitted: Config = toml::from_str("[redact]\nhigh_entropy = false\n").unwrap();
+        assert!(omitted.redact.dotenv);
+        let off: Config = toml::from_str("[redact]\ndotenv = false\n").unwrap();
+        assert!(!off.redact.dotenv);
+    }
+
+    #[test]
     fn discover_walks_to_parent() {
         let dir = std::env::temp_dir().join(format!(
             "symveil-cfg-{}-{}",
@@ -1163,6 +1181,7 @@ mod tests {
             mode = "enforce"
             internal_domains = ["example"]
             high_entropy = false
+            dotenv = true
 
             [redact.category]
             secret = "redact"
@@ -1197,6 +1216,7 @@ mod tests {
         assert_eq!(loaded.config.proxy.listen, "127.0.0.1");
         assert_eq!(loaded.config.binary.mode, BinaryMode::Block);
         assert_eq!(loaded.config.redact.mode, Mode::Enforce);
+        assert!(loaded.config.redact.dotenv);
         assert!(loaded.config.redact.pii.email);
         assert!(!loaded.config.redact.pii.phone);
         assert!(loaded.config.redact.pii.personnummer);

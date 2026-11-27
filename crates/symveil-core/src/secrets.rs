@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 
+use symveil_detect::dotenv::dotenv_assignment_hits;
 use symveil_detect::secrets::{
     base64_hits, high_entropy_hits, split_literal_hits, SecretSet, UserRule,
 };
@@ -24,10 +25,16 @@ pub struct SecretMasker {
     rules: SecretSet,
     literals: Vec<SecretLiteral>,
     high_entropy: bool,
+    dotenv: bool,
 }
 
 impl SecretMasker {
-    pub(crate) fn compile(user: &[SecretRule], vault: &Vault, high_entropy: bool) -> Result<Self> {
+    pub(crate) fn compile(
+        user: &[SecretRule],
+        vault: &Vault,
+        high_entropy: bool,
+        dotenv: bool,
+    ) -> Result<Self> {
         let mut literals = Vec::new();
         for entry in vault.iter() {
             if entry.original.is_empty() || entry.category != Category::Secret {
@@ -49,6 +56,7 @@ impl SecretMasker {
             rules: SecretSet::compile(&user_rules)?,
             literals,
             high_entropy,
+            dotenv,
         })
     }
 }
@@ -85,6 +93,11 @@ impl Masker for SecretMasker {
         }
         for hit in split_literal_hits(&self.rules, text) {
             out.push(secret_candidate(hit));
+        }
+        if self.dotenv {
+            for hit in dotenv_assignment_hits(text) {
+                out.push(secret_candidate(hit));
+            }
         }
         if self.high_entropy {
             let named: Vec<(usize, usize)> = out.iter().map(|hit| (hit.start, hit.end)).collect();
@@ -207,6 +220,55 @@ mod tests {
         assert!(!single.contains("hunter2hunter2"), "{single}");
         assert!(single.contains("DB_PASS"), "{single}");
         assert_eq!(rules, vec!["env-quoted-assignment".to_string()]);
+    }
+
+    #[test]
+    fn dotenv_file_redacts_values_the_suffix_rules_miss() {
+        let input = "\
+# synthetic
+export OPENAI_API_KEY=sk-Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1
+PGPASSWORD=\"n0t-a-token-db-pass\"
+DATABASE_URL=postgres://app:db-url-password@db.internal.example/app
+SESSION_COOKIE='s3ssion-value-9f3a'
+TOKEN_LIMIT=4096
+API_KEY=changeme
+";
+        let (out, rules) = masked(input);
+        for secret in [
+            "sk-Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1Ab1",
+            "n0t-a-token-db-pass",
+            "db-url-password",
+            "db.internal.example",
+            "s3ssion-value-9f3a",
+        ] {
+            assert!(!out.contains(secret), "{secret} in {out}");
+        }
+        assert!(out.contains("PGPASSWORD="), "{out}");
+        assert!(out.contains("SESSION_COOKIE="), "{out}");
+        assert!(out.contains("DATABASE_URL="), "{out}");
+        assert!(out.contains("TOKEN_LIMIT=4096"), "{out}");
+        assert!(out.contains("API_KEY=changeme"), "{out}");
+        assert!(out.contains("# synthetic"), "{out}");
+        assert!(
+            rules.iter().any(|rule| rule == "dotenv-assignment"),
+            "{rules:?}"
+        );
+
+        let mut off = Engine::new(
+            Vault::ephemeral(),
+            &RedactSection {
+                internal_domains: Vec::new(),
+                dotenv: false,
+                ..RedactSection::default()
+            },
+        )
+        .unwrap();
+        let (kept, _) = off.redact_str(input).unwrap();
+        assert!(kept.contains("n0t-a-token-db-pass"), "{kept}");
+        assert!(kept.contains("s3ssion-value-9f3a"), "{kept}");
+        assert!(!kept.contains("db-url-password"), "{kept}");
+        assert!(kept.contains("db.internal.example"), "{kept}");
+        assert_eq!(off.restore_str(&kept), input);
     }
 
     #[test]
