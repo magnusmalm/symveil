@@ -220,6 +220,7 @@ fn assert_shape(value: &Value) {
     assert!(value["vault"].get("writable").is_some());
     assert!(value["proxy"].get("timeout_secs").is_some());
     assert!(value["proxy"].get("high_entropy").is_some());
+    assert!(value["proxy"].get("dotenv").is_some());
 }
 
 #[test]
@@ -352,6 +353,7 @@ fn human_report_lists_the_effective_settings() {
         "mode",
         "enforce",
         "entropy",
+        "dotenv",
         "warnings",
         "none",
     ] {

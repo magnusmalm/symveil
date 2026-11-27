@@ -100,6 +100,7 @@ fn redact_schema() -> Schema {
         ("patterns", Schema::Array(Box::new(pattern_schema()))),
         ("secrets", Schema::Array(Box::new(secret_schema()))),
         ("high_entropy", Schema::Any),
+        ("dotenv", Schema::Any),
         ("pii", pii_schema()),
         ("names", names_schema()),
         ("learned", Schema::Any),

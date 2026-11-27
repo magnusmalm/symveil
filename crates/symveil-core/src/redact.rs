@@ -69,6 +69,7 @@ impl Engine {
             &redact.secrets,
             &vault,
             redact.high_entropy,
+            redact.dotenv,
         )?));
         maskers.push(Box::new(NetworkMasker::compile(&redact.internal_domains)?));
         if redact.pii.enabled() {

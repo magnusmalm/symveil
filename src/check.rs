@@ -135,6 +135,7 @@ pub struct Report {
     timeout_secs: u64,
     mode: String,
     high_entropy: bool,
+    dotenv: bool,
     pub warnings: Vec<Warning>,
     sample: Option<SampleReport>,
 }
@@ -176,6 +177,7 @@ impl Report {
         push_line(&mut out, "timeout", &self.timeout_secs.to_string());
         push_line(&mut out, "mode", &self.mode);
         push_line(&mut out, "entropy", on(self.high_entropy));
+        push_line(&mut out, "dotenv", on(self.dotenv));
         push_warnings(&mut out, &self.warnings);
         if let Some(sample) = &self.sample {
             push_sample(&mut out, sample);
@@ -224,6 +226,7 @@ impl Report {
                 "timeout_secs": self.timeout_secs,
                 "mode": self.mode,
                 "high_entropy": self.high_entropy,
+                "dotenv": self.dotenv,
                 "openai_base": self.openai_base,
                 "anthropic_base": self.anthropic_base,
                 "vault": self.vault.path,
@@ -377,6 +380,7 @@ pub fn inspect(request: &Request) -> Result<Report> {
         timeout_secs: cfg.proxy.timeout_secs,
         mode: cfg.redact.mode.to_string(),
         high_entropy: cfg.redact.high_entropy,
+        dotenv: cfg.redact.dotenv,
         warnings,
         sample,
     })

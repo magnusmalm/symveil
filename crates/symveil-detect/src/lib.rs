@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod dotenv;
 pub mod learned;
 pub mod literals;
 pub mod secrets;

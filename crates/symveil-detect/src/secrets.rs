@@ -169,6 +169,7 @@ const BUILTINS: &[Builtin] = &[
 pub fn builtin_rule_names() -> Vec<&'static str> {
     let mut names: Vec<&str> = BUILTINS.iter().map(|builtin| builtin.name).collect();
     names.push("base64-secret");
+    names.push("dotenv-assignment");
     names.push("split-string-literal");
     names
 }
@@ -363,7 +364,7 @@ fn secret_span<'a>(caps: &Captures<'a>, groups: &[usize]) -> Option<(usize, usiz
 /// Assignment and URL-password hits that are usually placeholders.
 /// All-digit URL passwords are kept: `user:12345678@host` is a credential,
 /// while `MAX_TOKEN=12345678` is a limit.
-fn is_low_signal(rule: &str, value: &str) -> bool {
+pub(crate) fn is_low_signal(rule: &str, value: &str) -> bool {
     if value.chars().count() < VALUE_MIN {
         return true;
     }
