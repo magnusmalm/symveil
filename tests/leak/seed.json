@@ -1157,10 +1157,10 @@
     {
       "id": "path-home",
       "category": "path.home",
-      "expect": "visible",
+      "expect": "masked",
       "family": "path",
       "value": "/home/jdoe/exempla/build",
-      "rule": null,
+      "rule": "home-path",
       "carrier": "/home/jdoe/exempla/build",
       "locations": [
         "home/jdoe/.bash_history"

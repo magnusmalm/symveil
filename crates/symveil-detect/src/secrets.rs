@@ -171,6 +171,10 @@ pub fn builtin_rule_names() -> Vec<&'static str> {
     names.push("base64-secret");
     names.push("dotenv-assignment");
     names.push("split-string-literal");
+    names.push("split-aws-key");
+    names.push("aws-secret-access-key");
+    names.push("home-path");
+    names.push("local-username");
     names
 }
 

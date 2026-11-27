@@ -44,6 +44,10 @@ fn default_dotenv() -> bool {
     true
 }
 
+fn default_home_paths() -> bool {
+    true
+}
+
 fn default_vault() -> String {
     ".symveil/vault.json".to_string()
 }
@@ -356,6 +360,15 @@ pub struct RedactSection {
     /// Set false to keep only the suffix rules and the known token shapes.
     #[serde(default = "default_dotenv")]
     pub dotenv: bool,
+    /// Mask the username in `/home/<user>`, `/Users/<user>`, `C:\Users\<user>`,
+    /// and `~user`, and mask the local username as a bare word. On by default.
+    #[serde(default = "default_home_paths")]
+    pub home_paths: bool,
+    /// Bare-word username. When omitted, the process `USER` or `USERNAME` is
+    /// used. A common account name is not masked as a bare word unless it is
+    /// set here. Path forms still mask that name.
+    #[serde(default)]
+    pub username: Option<String>,
     #[serde(default)]
     pub pii: PiiSection,
     /// Company, product, project, and person names. Empty leaves names untouched.
@@ -380,6 +393,8 @@ impl Default for RedactSection {
             secrets: Vec::new(),
             high_entropy: false,
             dotenv: true,
+            home_paths: true,
+            username: None,
             pii: PiiSection::default(),
             names: NamesSection::default(),
             learned: None,
@@ -795,10 +810,17 @@ mod tests {
     #[test]
     fn dotenv_is_on_unless_the_config_turns_it_off() {
         assert!(RedactSection::default().dotenv);
+        assert!(RedactSection::default().home_paths);
+        assert!(RedactSection::default().username.is_none());
         let omitted: Config = toml::from_str("[redact]\nhigh_entropy = false\n").unwrap();
         assert!(omitted.redact.dotenv);
-        let off: Config = toml::from_str("[redact]\ndotenv = false\n").unwrap();
+        assert!(omitted.redact.home_paths);
+        let off: Config =
+            toml::from_str("[redact]\ndotenv = false\nhome_paths = false\nusername = \"jdoe\"\n")
+                .unwrap();
         assert!(!off.redact.dotenv);
+        assert!(!off.redact.home_paths);
+        assert_eq!(off.redact.username.as_deref(), Some("jdoe"));
     }
 
     #[test]
@@ -1182,6 +1204,7 @@ mod tests {
             internal_domains = ["example"]
             high_entropy = false
             dotenv = true
+            home_paths = true
 
             [redact.category]
             secret = "redact"
@@ -1217,6 +1240,7 @@ mod tests {
         assert_eq!(loaded.config.binary.mode, BinaryMode::Block);
         assert_eq!(loaded.config.redact.mode, Mode::Enforce);
         assert!(loaded.config.redact.dotenv);
+        assert!(loaded.config.redact.home_paths);
         assert!(loaded.config.redact.pii.email);
         assert!(!loaded.config.redact.pii.phone);
         assert!(loaded.config.redact.pii.personnummer);

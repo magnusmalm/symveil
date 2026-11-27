@@ -537,6 +537,248 @@ async fn dotenv_file_values_do_not_reach_upstream() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn collect_strings(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::String(text) => {
+            out.push_str(text);
+            out.push('\n');
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_strings(item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                out.push_str(key);
+                out.push('\n');
+                collect_strings(child, out);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+/// Split AWS access key ids, split AWS secret access keys, and home paths.
+/// Each needle is a fragment that is not itself a complete `AKIA` + 16 key.
+fn aws_home_markers() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("line-id", "AKIALINEKEY0"),
+        ("concat-id", "AKIAPLUSKEY0"),
+        ("json-id", "AKIAJSONKEY0"),
+        ("chunk-id", "AKIACHUNKKEY"),
+        ("line-secret", "bPxRfiCYLINE0001"),
+        ("concat-secret", "bPxRfiCYPLUS0001"),
+        ("json-secret", "bPxRfiCYJSON0001"),
+        ("chunk-secret", "bPxRfiCYCHUNK001"),
+        ("labeled-secret", "wJalrXUtnFEMI/K7MDENG/xYbPxRfiCYlabel001"),
+        ("linux-home", "/home/jdoe"),
+        ("macos-home", "/Users/jdoe"),
+        ("windows-home", "C:\\Users\\jdoe"),
+        ("tilde-user", "~jdoe"),
+        ("bare-user", " jdoe "),
+    ]
+}
+
+fn aws_home_message() -> String {
+    "\
+read the creds
+AKIALINEKEY0
+LINE9Q2W
+code \"AKIAPLUSKEY0\" + \"PLUS9Q2W\"
+wJalrXUtnFEMI/K7MDENG/xY
+bPxRfiCYLINE0001
+code \"wJalrXUtnFEMI/K7MDENG/xY\" + \"bPxRfiCYPLUS0001\"
+cd /home/jdoe/proj
+cd /Users/jdoe/proj
+cd C:\\Users\\jdoe\\proj
+owner ~jdoe
+the user jdoe ran the tool
+see https://cdn.example/home/index and std::env and TOKEN_LIMIT=4096
+"
+    .to_string()
+}
+
+fn aws_home_fields() -> serde_json::Value {
+    serde_json::json!({
+        "access_part_a": "AKIAJSONKEY0",
+        "access_part_b": "JSON9Q2W",
+        "secret_part_a": "wJalrXUtnFEMI/K7MDENG/xY",
+        "secret_part_b": "bPxRfiCYJSON0001",
+        "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/xYbPxRfiCYlabel001"
+    })
+}
+
+fn aws_home_chunks() -> serde_json::Value {
+    serde_json::json!([
+        {"type": "text", "text": "AKIACHUNKKEY"},
+        {"type": "text", "text": "CHUNK9Q2"},
+        {"type": "text", "text": "wJalrXUtnFEMI/K7MDENG/xY"},
+        {"type": "text", "text": "bPxRfiCYCHUNK001"}
+    ])
+}
+
+#[tokio::test]
+async fn split_aws_and_home_paths_do_not_reach_upstream() {
+    for (name, needle) in aws_home_markers() {
+        assert!(needle.len() >= 4, "{name}");
+    }
+    assert_eq!("AKIALINEKEY0".len() + "LINE9Q2W".len(), 20);
+    assert_eq!("AKIAPLUSKEY0".len() + "PLUS9Q2W".len(), 20);
+    assert_eq!("AKIAJSONKEY0".len() + "JSON9Q2W".len(), 20);
+    assert_eq!("AKIACHUNKKEY".len() + "CHUNK9Q2".len(), 20);
+    for secret in [
+        "wJalrXUtnFEMI/K7MDENG/xYbPxRfiCYLINE0001",
+        "wJalrXUtnFEMI/K7MDENG/xYbPxRfiCYPLUS0001",
+        "wJalrXUtnFEMI/K7MDENG/xYbPxRfiCYJSON0001",
+        "wJalrXUtnFEMI/K7MDENG/xYbPxRfiCYCHUNK001",
+        "wJalrXUtnFEMI/K7MDENG/xYbPxRfiCYlabel001",
+    ] {
+        assert_eq!(secret.len(), 40, "{secret}");
+    }
+
+    let message = aws_home_message();
+    let fields = aws_home_fields();
+    let chunks = aws_home_chunks();
+    let redact = RedactSection {
+        internal_domains: Vec::new(),
+        username: Some("jdoe".to_string()),
+        ..RedactSection::default()
+    };
+    let engine = build_engine(Vault::ephemeral(), &redact).unwrap();
+    let (openai, openai_hits) = spawn_echo(false).await;
+    let (anthropic_base, anthropic_hits) = spawn_echo(false).await;
+    let dir = temp_dir("aws-home");
+    let state = AppState::new(
+        engine,
+        openai,
+        anthropic_base,
+        AuditLog::open(&dir.join("audit.jsonl")).unwrap(),
+        30,
+    )
+    .unwrap();
+    let proxy = spawn_proxy(state).await;
+    let client = reqwest::Client::new();
+    let shapes = [
+        (
+            "anthropic-messages",
+            "/v1/messages",
+            true,
+            serde_json::json!({
+                "model": "claude-test",
+                "max_tokens": 16,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": message},
+                        {"type": "tool_result", "tool_use_id": "toolu_aws", "content": fields},
+                        {"type": "text", "text": "chunks follow"},
+                    ]
+                }],
+                "chunks": chunks,
+                "fields": fields
+            }),
+        ),
+        (
+            "openai-chat",
+            "/v1/chat/completions",
+            false,
+            serde_json::json!({
+                "model": "gpt-test",
+                "messages": [
+                    {"role": "user", "content": message},
+                    {"role": "tool", "tool_call_id": "call_aws", "content": fields.to_string()}
+                ],
+                "chunks": chunks,
+                "fields": fields
+            }),
+        ),
+        (
+            "openai-responses",
+            "/v1/responses",
+            false,
+            serde_json::json!({
+                "model": "gpt-test",
+                "input": [
+                    {"role": "user", "content": message},
+                    {"type": "function_call_output", "call_id": "call_aws", "output": fields.to_string()}
+                ],
+                "chunks": chunks,
+                "fields": fields
+            }),
+        ),
+    ];
+
+    let mut leaks = Vec::new();
+    for (name, path, anthropic, body) in shapes {
+        let request = client
+            .post(format!("{proxy}{path}"))
+            .header("content-type", "application/json");
+        let request = if anthropic {
+            request.header("x-api-key", "sk-ant-test")
+        } else {
+            request.header("authorization", "Bearer test")
+        };
+        let response = request.body(body.to_string()).send().await.unwrap();
+        assert_eq!(response.status(), 200, "{name}");
+        let restored_body = response.text().await.unwrap();
+        let restored_json: serde_json::Value = serde_json::from_str(&restored_body).unwrap();
+        let mut restored = String::new();
+        collect_strings(&restored_json, &mut restored);
+        for (_marker, needle) in aws_home_markers() {
+            assert!(restored.contains(needle), "{name} did not restore {needle}");
+        }
+        assert!(restored.contains("TOKEN_LIMIT=4096"), "{name}");
+        assert!(restored.contains("std::env"), "{name}");
+        assert!(restored.contains("cdn.example/home/index"), "{name}");
+        let hits = if anthropic {
+            anthropic_hits.lock().unwrap()
+        } else {
+            openai_hits.lock().unwrap()
+        };
+        let seen = hits
+            .iter()
+            .rev()
+            .find(|hit| hit.path == path)
+            .unwrap_or_else(|| panic!("{name} did not reach upstream"));
+        let parsed: serde_json::Value = serde_json::from_slice(&seen.body).unwrap();
+        let mut forwarded = String::new();
+        collect_strings(&parsed, &mut forwarded);
+        let mut present = Vec::new();
+        for (marker, needle) in aws_home_markers() {
+            if forwarded.contains(needle) {
+                present.push(marker);
+            }
+        }
+        assert!(
+            forwarded.contains("TOKEN_LIMIT=4096"),
+            "{name} dropped a keeper"
+        );
+        assert!(forwarded.contains("std::env"), "{name}");
+        assert!(
+            forwarded.contains("cdn.example/home/index"),
+            "{name} masked a url path"
+        );
+        assert!(
+            forwarded.contains("/home/"),
+            "{name} masked the path prefix"
+        );
+        assert!(forwarded.contains("/Users/"), "{name}");
+        leaks.push(format!(
+            "{name}: {} of {} leaked: {present:?}",
+            present.len(),
+            aws_home_markers().len()
+        ));
+        drop(hits);
+    }
+    assert!(
+        leaks.iter().all(|line| line.contains("0 of ")),
+        "split aws and home values reached upstream:\n{}",
+        leaks.join("\n")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 async fn spawn_echo(sse: bool) -> (String, Arc<Mutex<Vec<Recorded>>>) {
     spawn_mock_inner(Vec::new(), sse, true, 7, None).await
 }
