@@ -403,7 +403,11 @@ async fn cmd_proxy(args: ProxyArgs) -> Result<()> {
     engine.save_if_dirty()?;
 
     let audit_path = resolve_path(&root, &cfg.proxy.audit_log);
-    let audit = AuditLog::open(&audit_path)?;
+    let audit = if cfg.proxy.audit_buffered {
+        AuditLog::open_buffered(&audit_path)?
+    } else {
+        AuditLog::open(&audit_path)?
+    };
     let state = AppState::new(
         engine,
         cfg.proxy.openai_base.clone(),

@@ -88,10 +88,23 @@ pub fn replacement_from_hit(hit: &Hit) -> AuditReplacement {
 
 pub struct AuditLog {
     writer: Option<std::io::BufWriter<std::fs::File>>,
+    /// False leaves lines in the buffer until the log is dropped. A crash can
+    /// lose those lines. True flushes every line, which is the default.
+    flush_each_line: bool,
 }
 
 impl AuditLog {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::create(path, true)
+    }
+
+    /// Buffer lines and flush them when the log is dropped. A crash can lose
+    /// the last lines still in the buffer. A clean shutdown writes them.
+    pub fn open_buffered(path: &Path) -> Result<Self> {
+        Self::create(path, false)
+    }
+
+    fn create(path: &Path, flush_each_line: bool) -> Result<Self> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 crate::perms::ensure_private_dir(parent)?;
@@ -101,6 +114,7 @@ impl AuditLog {
             .with_context(|| format!("open audit log {}", path.display()))?;
         Ok(Self {
             writer: Some(std::io::BufWriter::new(file)),
+            flush_each_line,
         })
     }
 
@@ -191,8 +205,18 @@ impl AuditLog {
         };
         serde_json::to_writer(&mut *writer, event)?;
         writer.write_all(b"\n")?;
-        writer.flush()?;
+        if self.flush_each_line {
+            writer.flush()?;
+        }
         Ok(())
+    }
+}
+
+impl Drop for AuditLog {
+    fn drop(&mut self) {
+        if let Some(writer) = self.writer.as_mut() {
+            let _ = writer.flush();
+        }
     }
 }
 
@@ -370,6 +394,49 @@ mod tests {
         assert!(json.contains("10.1.2.3"), "{json}");
         assert!(json.contains("\"action\":\"warn\""));
         assert!(!json.contains("placeholder"), "{json}");
+    }
+
+    fn address_hit() -> Hit {
+        Hit {
+            original: "10.1.2.3".to_string(),
+            placeholder: "@@sv:0123abcd@@".to_string(),
+            category: Category::Ip,
+            rule: Some("ipv4".to_string()),
+            action: Action::Redact,
+        }
+    }
+
+    #[test]
+    fn line_flush_reaches_disk_before_the_log_is_dropped() {
+        let dir = temp_dir("audit-line-flush");
+        let path = dir.join("audit.jsonl");
+        let mut log = AuditLog::open(&path).unwrap();
+        log.record_request("/v1/messages", &[address_hit()], &[])
+            .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("10.1.2.3"), "{text}");
+        assert!(text.contains("\"dir\":\"request\""), "{text}");
+        drop(log);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn buffered_lines_stay_off_disk_until_the_log_is_dropped() {
+        let dir = temp_dir("audit-buffered");
+        let path = dir.join("audit.jsonl");
+        let mut log = AuditLog::open_buffered(&path).unwrap();
+        log.record_request("/v1/messages", &[address_hit()], &[])
+            .unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !before.contains("10.1.2.3"),
+            "buffered line reached disk before drop: {before}"
+        );
+        drop(log);
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("10.1.2.3"), "{after}");
+        assert!(after.contains("\"dir\":\"request\""), "{after}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
