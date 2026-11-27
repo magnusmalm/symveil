@@ -15,6 +15,10 @@ license = "Apache-2.0"
 [lints.rust]
 unexpected_cfgs = "allow"
 
+[features]
+# Off by default. The system allocator stays the release build.
+mimalloc = ["symveil-core/mimalloc"]
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
