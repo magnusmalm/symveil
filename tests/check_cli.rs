@@ -210,6 +210,7 @@ fn assert_shape(value: &Value) {
     assert!(value["names"].get("terms").is_some());
     assert!(value["names"].get("people").is_some());
     assert!(value["names"].get("values").is_none());
+    assert!(value["learned"].get("decisions").is_some());
     assert!(value["learned"].get("terms").is_some());
     assert!(value["learned"].get("people").is_some());
     assert!(value["learned"].get("secrets").is_some());

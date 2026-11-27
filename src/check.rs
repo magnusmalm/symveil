@@ -1201,7 +1201,8 @@ fn learned_line(learned: &LearnedView) -> String {
 
 fn counts_text(counts: &LearnedCounts) -> String {
     format!(
-        "terms={} people={} secrets={} emails={} ips={} hosts={} domains={} symbols={} skips={} keeps={}",
+        "decisions={} terms={} people={} secrets={} emails={} ips={} hosts={} domains={} symbols={} skips={} keeps={}",
+        counts.decisions,
         counts.terms,
         counts.people,
         counts.secrets,
@@ -1221,6 +1222,7 @@ fn learned_json(report: &Report) -> Value {
         "path": report.learned_path,
         "configured": report.learned_configured,
         "loaded": report.learned_loaded,
+        "decisions": counts.decisions,
         "terms": counts.terms,
         "people": counts.people,
         "secrets": counts.secrets,

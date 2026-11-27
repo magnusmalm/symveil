@@ -441,6 +441,8 @@ pub struct LearnedOrigin {
 /// `terms` and `people` are the name matcher. `secrets`, `emails`, `ips`,
 /// `hosts`, `domains`, and `symbols` are rules the secret scanner enforces.
 /// `keeps` is the allow list. `skips` are resume rows and are not matched.
+/// `decisions` is every resume row, including redact and keep. It is not the
+/// term count: a redact decision is a term, a person, or one scanner rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LearnedCounts {
     pub terms: usize,
@@ -453,6 +455,8 @@ pub struct LearnedCounts {
     pub symbols: usize,
     pub skips: usize,
     pub keeps: usize,
+    /// Resume rows in the file. This is the decision count, not `terms`.
+    pub decisions: usize,
 }
 
 impl LearnedCounts {
@@ -477,6 +481,7 @@ impl LearnedCounts {
                 .iter()
                 .filter(|decision| decision.action == "skip")
                 .count(),
+            decisions: file.decisions.len(),
             ..Self::default()
         };
         for rule in &file.secrets {

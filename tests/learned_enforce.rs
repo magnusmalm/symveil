@@ -135,6 +135,15 @@ fn three_thousand_literal_rules_load_and_match() {
 }
 
 /// Same shape as a real learned file: 204267 decisions, about 111k redact rules.
+///
+/// The 10915 terms are the name redact decisions after case-folding dedup.
+/// They are not the 111377 non-name redact rules (secrets 25085, symbols
+/// 36237, hosts 46040, domains 2000, emails 1000, ips 1015). People are 533
+/// and their tokens are three letters, so they are not copied into the term
+/// list. Skips are 80664 and write no rule. Keeps are 778 and are the allow
+/// list. Those buckets add up to 204267. Nothing is dropped. `symveil check`
+/// prints `decisions` and `terms` as separate numbers for that reason.
+///
 /// Run with `cargo test --release --test learned_enforce -- --ignored --nocapture`.
 #[test]
 #[ignore = "release scale benchmark"]
@@ -227,7 +236,10 @@ fn scale_learned_file_loads_and_saves_quickly() {
 
     let save_started = Instant::now();
     let file = file_from_decisions(&decisions).unwrap();
+    let built = save_started.elapsed();
+    let toml_started = Instant::now();
     let text = file.to_toml().unwrap();
+    let toml_elapsed = toml_started.elapsed();
     let save_elapsed = save_started.elapsed();
     let counts = LearnedCounts::from_file(&file);
     assert_eq!(counts.terms, TERMS);
@@ -240,6 +252,7 @@ fn scale_learned_file_loads_and_saves_quickly() {
     assert_eq!(counts.ips, IPS);
     assert_eq!(counts.skips, SKIPS);
     assert_eq!(counts.keeps, KEEPS);
+    assert_eq!(counts.decisions, 204_267);
 
     let load_started = Instant::now();
     let mut cfg = Config::default();
@@ -263,7 +276,7 @@ fn scale_learned_file_loads_and_saves_quickly() {
     let body_elapsed = body_started.elapsed();
 
     eprintln!(
-        "scale decisions={} toml_bytes={} save={save_elapsed:?} load={load_elapsed:?} redact_hit={redact_elapsed:?} redact_miss={body_elapsed:?} body_bytes={}",
+        "scale decisions={} toml_bytes={} save={save_elapsed:?} build={built:?} toml={toml_elapsed:?} load={load_elapsed:?} redact_hit={redact_elapsed:?} redact_miss={body_elapsed:?} body_bytes={}",
         decisions.len(),
         text.len(),
         body.len()

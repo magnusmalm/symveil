@@ -134,9 +134,84 @@ impl LearnedFile {
         if self.version != 1 {
             bail!("refusing to write learned.toml version {}", self.version);
         }
-        let body = toml::to_string_pretty(self).context("serialize learned.toml")?;
-        Ok(format!("{HEADER}{body}"))
+        // serde's pretty writer spends most of a 200k-decision save on
+        // per-field reflection. This writes the same document.
+        let mut body = String::with_capacity(
+            HEADER.len()
+                + 160 * (self.decisions.len() + self.secrets.len() + self.symbols.len() + 8),
+        );
+        body.push_str(HEADER);
+        body.push_str("version = 1\n\n[names]\n");
+        push_string_list(&mut body, "terms", &self.names.terms);
+        push_string_list(&mut body, "people", &self.names.people);
+        body.push('\n');
+        for rule in &self.secrets {
+            push_rule(&mut body, "secrets", rule);
+        }
+        for rule in &self.symbols {
+            push_rule(&mut body, "symbols", rule);
+        }
+        body.push_str("[allow]\n");
+        push_string_list(&mut body, "entries", &self.allow.entries);
+        body.push('\n');
+        for decision in &self.decisions {
+            body.push_str("[[decisions]]\n");
+            push_pair(&mut body, "key", &decision.key);
+            push_pair(&mut body, "action", &decision.action);
+            push_pair(&mut body, "category", &decision.category);
+            push_pair(&mut body, "text", &decision.text);
+            body.push('\n');
+        }
+        Ok(body)
     }
+}
+
+fn push_string_list(out: &mut String, key: &str, values: &[String]) {
+    out.push_str(key);
+    out.push_str(" = [");
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        push_basic_string(out, value);
+    }
+    out.push_str("]\n");
+}
+
+fn push_rule(out: &mut String, table: &str, rule: &LearnedRule) {
+    out.push_str("[[");
+    out.push_str(table);
+    out.push_str("]]\n");
+    push_pair(out, "name", &rule.name);
+    push_pair(out, "regex", &rule.regex);
+    out.push('\n');
+}
+
+fn push_pair(out: &mut String, key: &str, value: &str) {
+    out.push_str(key);
+    out.push_str(" = ");
+    push_basic_string(out, value);
+    out.push('\n');
+}
+
+fn push_basic_string(out: &mut String, value: &str) {
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other if other.is_control() => {
+                out.push_str(&format!("\\u{:04X}", u32::from(other)));
+            }
+            other => out.push(other),
+        }
+    }
+    out.push('"');
 }
 
 const HEADER: &str = "\
@@ -198,6 +273,15 @@ text = "Exempla"
         assert_eq!(file.decisions[0].action, "redact");
         let again = LearnedFile::parse(&file.to_toml().unwrap()).unwrap();
         assert_eq!(again, file);
+    }
+
+    #[test]
+    fn quotes_and_backslashes_round_trip() {
+        let text = "say \"hi\" and \\path and line\nbreak";
+        let mut file = LearnedFile::parse("version = 1\n").unwrap();
+        file.names.terms.push(text.to_string());
+        let parsed = LearnedFile::parse(&file.to_toml().unwrap()).unwrap();
+        assert_eq!(parsed.names.terms, vec![text.to_string()]);
     }
 
     #[test]

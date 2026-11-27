@@ -617,6 +617,23 @@ fn write_help(stdout: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
+/// A full list of ten thousand names is one terminal line and is what makes
+/// quit look stuck. Small sessions still print every name.
+fn summarize_list(label: &str, items: &[&str]) -> String {
+    const SHOWN: usize = 8;
+    if items.is_empty() {
+        return format!("{label}: none");
+    }
+    if items.len() <= SHOWN {
+        return format!("{label}: {}", items.join(", "));
+    }
+    format!(
+        "{label}: {} (showing {SHOWN} of {})",
+        items[..SHOWN].join(", "),
+        items.len()
+    )
+}
+
 fn write_save_summary(
     decisions: &[Decision],
     candidates: &[Candidate],
@@ -672,24 +689,8 @@ fn write_save_summary(
             (DecisionAction::Redact, _) => other += 1,
         }
     }
-    writeln!(
-        stdout,
-        "  redact names: {}",
-        if names.is_empty() {
-            "none".to_string()
-        } else {
-            names.join(", ")
-        }
-    )?;
-    writeln!(
-        stdout,
-        "  redact people: {}",
-        if people.is_empty() {
-            "none".to_string()
-        } else {
-            people.join(", ")
-        }
-    )?;
+    writeln!(stdout, "  {}", summarize_list("redact names", &names))?;
+    writeln!(stdout, "  {}", summarize_list("redact people", &people))?;
     writeln!(stdout, "  redact secrets: {secrets} (values not printed)")?;
     writeln!(stdout, "  redact symbols: {symbols}")?;
     writeln!(stdout, "  redact hosts: {hosts}")?;
@@ -1030,6 +1031,18 @@ mod tests {
 
     use super::*;
     use crate::walk::{WalkStats, WalkedFile};
+
+    #[test]
+    fn a_long_name_list_is_counted_instead_of_printed() {
+        let names = [
+            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+        ];
+        let line = summarize_list("redact names", &names);
+        assert!(line.contains("showing 8 of 9"), "{line}");
+        assert!(!line.contains("nine"), "{line}");
+        let short = summarize_list("redact names", &["Exempla"]);
+        assert_eq!(short, "redact names: Exempla");
+    }
 
     fn walked(text: &str) -> Walked {
         Walked {
