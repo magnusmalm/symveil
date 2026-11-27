@@ -135,10 +135,14 @@ impl Engine {
             return Ok((Vec::new(), Vec::new()));
         }
         if let Ok(mut value) = serde_json::from_slice::<Value>(body) {
-            let mut blocks = Vec::new();
-            self.collect_blocks(&value, &mut blocks);
-            if !blocks.is_empty() {
-                return Ok((body.to_vec(), blocks));
+            // A document with no block action cannot produce a block hit, so
+            // the extra plan() of every string only duplicates the walk below.
+            if self.any_block_action() {
+                let mut blocks = Vec::new();
+                self.collect_blocks(&value, &mut blocks);
+                if !blocks.is_empty() {
+                    return Ok((body.to_vec(), blocks));
+                }
             }
             let mut hits = Vec::new();
             self.redact_value(&mut value, &mut hits)?;
@@ -364,6 +368,21 @@ impl Engine {
             return spans;
         }
         select_spans(spans)
+    }
+
+    /// True when some configured action is block. Observe forces warn, so a
+    /// block entry in that mode never fires.
+    fn any_block_action(&self) -> bool {
+        if self.mode == Mode::Observe {
+            return false;
+        }
+        self.rule_actions
+            .values()
+            .any(|action| *action == Action::Block)
+            || self
+                .category_actions
+                .values()
+                .any(|action| *action == Action::Block)
     }
 
     fn resolve(&self, category: Category, rule: Option<&str>) -> Action {
@@ -1095,6 +1114,39 @@ mod tests {
         let rendered = String::from_utf8_lossy(&out);
         assert!(rendered.contains("AKIAIOSFODNN7EXAMPLE"));
         assert!(!rendered.contains("@@sv:"));
+    }
+
+    #[test]
+    fn json_without_a_block_action_redacts_the_value() {
+        let mut engine = engine(RedactSection {
+            internal_domains: Vec::new(),
+            ..RedactSection::default()
+        });
+        let body = br#"{"note":"key AKIAIOSFODNN7EXAMPLE","content":"plain words"}"#;
+        let (out, hits) = engine.redact_bytes(body).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("AKIA"), "{text}");
+        assert!(text.contains("plain words"), "{text}");
+        assert!(hits.iter().all(|hit| hit.action == Action::Redact));
+        let (restored, _) = engine.restore_bytes(text.as_bytes(), false);
+        assert_eq!(restored, body);
+    }
+
+    #[test]
+    fn observe_treats_a_json_block_entry_as_warn() {
+        let mut engine = engine(RedactSection {
+            internal_domains: Vec::new(),
+            mode: Mode::Observe,
+            builtin_actions: HashMap::from([("aws-access-key-id".into(), Action::Block)]),
+            ..RedactSection::default()
+        });
+        let body = br#"{"note":"key AKIAIOSFODNN7EXAMPLE"}"#;
+        let (out, hits) = engine.redact_bytes(body).unwrap();
+        assert_eq!(out, body);
+        assert!(hits.iter().all(|hit| hit.action == Action::Warn));
+        assert!(hits
+            .iter()
+            .any(|hit| hit.rule.as_deref() == Some("aws-access-key-id")));
     }
 
     fn b64(bytes: &[u8]) -> String {
