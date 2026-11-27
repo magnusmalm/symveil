@@ -37,3 +37,14 @@ jobs:
       # report in the log is the measurement. Do not skip the test to make it green.
       - name: leak test
         run: cargo test --test leak_harness --locked leak_measurement -- --nocapture
+
+  # Timing only. A slow or noisy run must not fail the build.
+  bench:
+    name: bench (non-gating)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: quick bench
+        run: scripts/bench.sh --quick
