@@ -1,6 +1,6 @@
 //! `learned.toml` on disk, mode 0600, outside the scanned tree.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,7 @@ use regex::Regex;
 use symveil_detect::learned::{
     DecisionRecord, LearnedAllow, LearnedFile, LearnedNames, LearnedRule,
 };
+use symveil_detect::literals::{escape_literal, literal_is_match, literal_pattern};
 
 use crate::model::{Decision, DecisionAction, LearnCategory};
 
@@ -80,6 +81,9 @@ pub fn file_from_decisions(decisions: &[Decision]) -> Result<LearnedFile> {
     let mut symbols = Vec::new();
     let mut allow = Vec::new();
     let mut records = Vec::new();
+    let mut seen_terms = HashSet::new();
+    let mut seen_people = HashSet::new();
+    let mut seen_allow = HashSet::new();
     for decision in &ordered {
         records.push(DecisionRecord {
             key: decision.key.clone(),
@@ -88,16 +92,16 @@ pub fn file_from_decisions(decisions: &[Decision]) -> Result<LearnedFile> {
             text: decision.text.clone(),
         });
         match decision.action {
-            DecisionAction::Keep => push_unique(&mut allow, &decision.text),
+            DecisionAction::Keep => push_unique(&mut allow, &mut seen_allow, &decision.text),
             DecisionAction::Skip => {}
             DecisionAction::Redact => match filed_category(decision) {
                 LearnCategory::Name => {
                     check_term(&decision.text)?;
-                    push_unique(&mut names.terms, &decision.text);
+                    push_unique(&mut names.terms, &mut seen_terms, &decision.text);
                 }
                 LearnCategory::Person => {
                     check_person(&decision.text)?;
-                    push_unique(&mut names.people, &decision.text);
+                    push_unique(&mut names.people, &mut seen_people, &decision.text);
                 }
                 LearnCategory::Symbol => symbols.push(rule(decision)?),
                 LearnCategory::Secret
@@ -297,16 +301,24 @@ fn covered_or_bail(text: &str, sources: &[String], regex: String) -> Result<Stri
 }
 
 fn covers(pattern: &str, text: &str, sources: &[String]) -> Result<bool> {
-    let re = Regex::new(pattern).with_context(|| "learned rule regex")?;
     let lines: Vec<&str> = sources
         .iter()
         .map(String::as_str)
         .filter(|line| line.contains(text))
         .collect();
-    if lines.is_empty() {
-        return Ok(re.is_match(text));
+    let samples: Vec<&str> = if lines.is_empty() { vec![text] } else { lines };
+    if let Some(literal) = literal_pattern(pattern) {
+        return Ok(samples.iter().all(|line| {
+            literal_is_match(
+                line,
+                &literal.text,
+                literal.left_boundary,
+                literal.right_boundary,
+            )
+        }));
     }
-    Ok(lines.iter().all(|line| re.is_match(line)))
+    let re = Regex::new(pattern).with_context(|| "learned rule regex")?;
+    Ok(samples.iter().all(|line| re.is_match(line)))
 }
 
 fn side_glued(text: &str, sources: &[String], left: bool) -> bool {
@@ -329,15 +341,6 @@ fn is_regex_word(ch: char) -> bool {
     ch == '_' || ch.is_alphanumeric()
 }
 
-/// `regex::escape` leaves raw newlines in the pattern. Spell controls as
-/// escapes so a learned rule stays printable and still matches the source.
-fn escape_literal(text: &str) -> String {
-    regex::escape(text)
-        .replace('\n', r"\n")
-        .replace('\r', r"\r")
-        .replace('\t', r"\t")
-}
-
 static CODE_NUM: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^([A-Z]{2,8})-(\d{2,8})$").expect("numeric product code"));
 static CODE_WORD: LazyLock<Regex> = LazyLock::new(|| {
@@ -358,40 +361,61 @@ const NAME_SUFFIXES: &[&str] = &[
     "arna", "erna", "orna", "en", "et", "na", "ar", "or", "er", "s",
 ];
 
-/// Drop a decision the proxy already covers with a broader term, person, or email.
+struct TermForm {
+    text: String,
+    chars: usize,
+}
+
+/// Drop a decision the name matcher already covers.
+///
+/// A suffix (`Exemplas`) or a trailing separator (`exempla_`) is covered by
+/// the term. A longer identifier (`tundrahorn_fan_init`) is not. A host,
+/// domain, or symbol that merely sits inside an email is kept: the email
+/// rule matches the whole address, not the host on its own.
 fn collapse_redundant(decisions: &mut Vec<Decision>) {
-    let terms: Vec<String> = decisions
-        .iter()
-        .filter(|decision| {
-            decision.action == DecisionAction::Redact && decision.category == LearnCategory::Name
-        })
-        .map(|decision| decision.text.clone())
-        .collect();
-    let emails: Vec<String> = decisions
-        .iter()
-        .filter(|decision| {
-            decision.action == DecisionAction::Redact && decision.category == LearnCategory::Email
-        })
-        .map(|decision| decision.text.to_lowercase())
-        .collect();
+    let mut terms = Vec::new();
+    let mut by_letters: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut suffix_forms = HashSet::new();
+    for decision in decisions.iter() {
+        if decision.action != DecisionAction::Redact || decision.category != LearnCategory::Name {
+            continue;
+        }
+        let form = letters(&decision.text);
+        let index = terms.len();
+        by_letters.entry(form.clone()).or_default().push(index);
+        for suffix in NAME_SUFFIXES {
+            let mut covered = String::with_capacity(form.len() + suffix.len());
+            covered.push_str(&form);
+            covered.push_str(suffix);
+            suffix_forms.insert(covered);
+        }
+        terms.push(TermForm {
+            text: decision.text.clone(),
+            chars: decision.text.chars().count(),
+        });
+    }
     decisions.retain(|decision| {
-        decision.action != DecisionAction::Redact || !redundant(decision, &terms, &emails)
+        decision.action != DecisionAction::Redact
+            || !redundant(decision, &terms, &by_letters, &suffix_forms)
     });
 }
 
-fn redundant(decision: &Decision, terms: &[String], emails: &[String]) -> bool {
+fn redundant(
+    decision: &Decision,
+    terms: &[TermForm],
+    by_letters: &HashMap<String, Vec<usize>>,
+    suffix_forms: &HashSet<String>,
+) -> bool {
     if decision.category == LearnCategory::Name {
-        if terms
-            .iter()
-            .any(|term| term != &decision.text && same_or_suffix(&decision.text, term))
-        {
+        let own = letters(&decision.text);
+        if covered_by_term(decision, &own, terms, by_letters, suffix_forms) {
             return true;
         }
         let words: Vec<&str> = decision.text.split_whitespace().collect();
         if words.len() >= 2
             && words
                 .iter()
-                .all(|word| terms.iter().any(|term| letters(term) == letters(word)))
+                .all(|word| by_letters.contains_key(&letters(word)))
         {
             return true;
         }
@@ -403,38 +427,32 @@ fn redundant(decision: &Decision, terms: &[String], emails: &[String]) -> bool {
         if product_code_regex(&decision.text).is_some() {
             return false;
         }
-        // A suffix (`Exemplas`) or a trailing separator (`exempla_`) is already
-        // covered. A longer identifier (`tundrahorn_fan_init`) is not: the tail
-        // would stay visible.
-        if terms
-            .iter()
-            .any(|term| same_or_suffix(&decision.text, term))
-        {
-            return true;
-        }
-        let lower = decision.text.to_lowercase();
-        if emails
-            .iter()
-            .any(|email| email.contains(&lower) && email != &lower)
-        {
+        let own = letters(&decision.text);
+        if covered_by_term(decision, &own, terms, by_letters, suffix_forms) {
             return true;
         }
     }
     false
 }
 
-fn same_or_suffix(text: &str, broader: &str) -> bool {
-    let own = letters(text);
-    let base = letters(broader);
-    if own == base {
-        return text != broader
-            && (text.chars().count() > broader.chars().count()
-                || (text.chars().count() == broader.chars().count() && text > broader));
+fn covered_by_term(
+    decision: &Decision,
+    own: &str,
+    terms: &[TermForm],
+    by_letters: &HashMap<String, Vec<usize>>,
+    suffix_forms: &HashSet<String>,
+) -> bool {
+    let chars = decision.text.chars().count();
+    if let Some(group) = by_letters.get(own) {
+        if group.iter().any(|&index| {
+            let term = &terms[index];
+            decision.text != term.text
+                && (chars > term.chars || (chars == term.chars && decision.text > term.text))
+        }) {
+            return true;
+        }
     }
-    own.starts_with(&base)
-        && NAME_SUFFIXES
-            .iter()
-            .any(|suffix| own == format!("{base}{suffix}"))
+    suffix_forms.contains(own)
 }
 
 fn letters(text: &str) -> String {
@@ -473,10 +491,11 @@ fn check_person(text: &str) -> Result<()> {
     Ok(())
 }
 
-fn push_unique(list: &mut Vec<String>, value: &str) {
-    if !value.is_empty() && !list.iter().any(|existing| existing == value) {
-        list.push(value.to_string());
+fn push_unique(list: &mut Vec<String>, seen: &mut HashSet<String>, value: &str) {
+    if value.is_empty() || !seen.insert(value.to_string()) {
+        return;
     }
+    list.push(value.to_string());
 }
 
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -770,10 +789,13 @@ mod tests {
                 .unwrap()
                 .is_match("svcn-pytest-opaque-0001")
         }));
-        assert!(file
-            .secrets
-            .iter()
-            .all(|rule| !rule.regex.contains("exempla.test") || rule.regex.contains('@')));
+        assert!(
+            file.secrets
+                .iter()
+                .any(|rule| rule.regex.contains("exempla\\.test")),
+            "the domain is not covered by the email rule: {:?}",
+            file.secrets
+        );
     }
 
     #[test]
@@ -812,5 +834,44 @@ mod tests {
             .decisions
             .iter()
             .any(|decision| decision.action == "skip"));
+    }
+
+    #[test]
+    fn two_thousand_keeps_and_redacts_save_in_under_a_second() {
+        let mut decisions = Vec::with_capacity(4_000);
+        for index in 0..2_000 {
+            decisions.push(Decision::new(
+                DecisionAction::Keep,
+                LearnCategory::Symbol,
+                format!("keep{index}token"),
+            ));
+            decisions.push(Decision::new(
+                DecisionAction::Redact,
+                LearnCategory::Host,
+                format!("h{index}.example"),
+            ));
+        }
+        let started = std::time::Instant::now();
+        let file = file_from_decisions(&decisions).unwrap();
+        let first = file.to_toml().unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "saving 4000 decisions took {elapsed:?}"
+        );
+        assert_eq!(file.allow.entries.len(), 2_000);
+        assert_eq!(file.secrets.len(), 2_000);
+        let again = file_from_decisions(&decisions).unwrap().to_toml().unwrap();
+        assert_eq!(first, again);
+        let dir = std::env::temp_dir().join(format!("symveil-save-{}", std::process::id()));
+        let path = dir.join("nested").join("learned.toml");
+        write_private(&path, first.as_bytes()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 }

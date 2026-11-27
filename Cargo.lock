@@ -2185,6 +2185,7 @@ name = "symveil-core"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "aho-corasick",
  "anyhow",
  "async-stream",
  "axum",
@@ -2212,6 +2213,7 @@ dependencies = [
 name = "symveil-detect"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "base64 0.22.1",
  "regex",

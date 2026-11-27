@@ -28,9 +28,10 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 
-pub use model::{Decision, LearnCategory};
+pub use model::{Decision, DecisionAction, LearnCategory};
 pub use offline::assert_offline;
 pub use progress::stderr_is_tty;
+pub use store::file_from_decisions;
 
 pub const DEFAULT_MAX_BYTES: u64 = 1024 * 1024;
 

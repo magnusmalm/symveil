@@ -121,6 +121,10 @@ pub fn review(
     stdin: &mut dyn BufRead,
     stdout: &mut dyn Write,
 ) -> Result<Vec<Decision>> {
+    let mut known: HashSet<String> = decisions
+        .iter()
+        .map(|decision| decision.key.clone())
+        .collect();
     let stats = &walked.stats;
     writeln!(stdout, "symveil learn")?;
     writeln!(
@@ -182,8 +186,7 @@ pub fn review(
                             decision.text,
                             decision.category.as_str()
                         )?;
-                        decisions.retain(|existing| existing.key != decision.key);
-                        decisions.push(decision);
+                        remember(&mut decisions, &mut known, decision);
                     }
                 }
                 Err(message) => writeln!(stdout, "{message}")?,
@@ -292,6 +295,7 @@ pub fn review(
                 &pending,
                 show_hidden,
                 &mut decisions,
+                &mut known,
                 stdout,
             )? {
                 Apply::Stay => {}
@@ -324,6 +328,7 @@ fn apply_decision(
     pending: &[Candidate],
     show_hidden: bool,
     decisions: &mut Vec<Decision>,
+    known: &mut HashSet<String>,
     stdout: &mut dyn Write,
 ) -> Result<Apply> {
     let (Phase::Group(bucket) | Phase::Drill { bucket, .. }) = phase else {
@@ -343,10 +348,10 @@ fn apply_decision(
         return Ok(Apply::Stay);
     }
     match phase {
-        Phase::Group(bucket) => apply_group(command, *bucket, &items, decisions, stdout),
+        Phase::Group(bucket) => apply_group(command, *bucket, &items, decisions, known, stdout),
         Phase::Drill { index, .. } => {
             let index = (*index).min(items.len() - 1);
-            apply_one(command, &items, index, decisions, stdout)
+            apply_one(command, &items, index, decisions, known, stdout)
         }
         Phase::Triage => Ok(Apply::Stay),
     }
@@ -357,12 +362,13 @@ fn apply_group(
     bucket: Bucket,
     items: &[Candidate],
     decisions: &mut Vec<Decision>,
+    known: &mut HashSet<String>,
     stdout: &mut dyn Write,
 ) -> Result<Apply> {
     match command {
         Command::AllRedact(None) if bucket == Bucket::Other => {
             for item in items {
-                record(decisions, item, DecisionAction::Skip, item.category);
+                record(decisions, known, item, DecisionAction::Skip, item.category);
             }
             writeln!(
                 stdout,
@@ -374,21 +380,21 @@ fn apply_group(
         Command::Redact(category) | Command::AllRedact(category) => {
             for item in items {
                 let chosen = category.unwrap_or(item.category);
-                record(decisions, item, DecisionAction::Redact, chosen);
+                record(decisions, known, item, DecisionAction::Redact, chosen);
             }
             writeln!(stdout, "redact {} in this group", items.len())?;
             Ok(Apply::Triage)
         }
         Command::Keep | Command::AllKeep => {
             for item in items {
-                record(decisions, item, DecisionAction::Keep, item.category);
+                record(decisions, known, item, DecisionAction::Keep, item.category);
             }
             writeln!(stdout, "keep {} in this group", items.len())?;
             Ok(Apply::Triage)
         }
         Command::Skip | Command::AllSkip => {
             for item in items {
-                record(decisions, item, DecisionAction::Skip, item.category);
+                record(decisions, known, item, DecisionAction::Skip, item.category);
             }
             writeln!(
                 stdout,
@@ -411,44 +417,45 @@ fn apply_one(
     items: &[Candidate],
     index: usize,
     decisions: &mut Vec<Decision>,
+    known: &mut HashSet<String>,
     stdout: &mut dyn Write,
 ) -> Result<Apply> {
     let item = &items[index];
     match command {
         Command::Redact(category) => {
             let chosen = category.unwrap_or(item.category);
-            record(decisions, item, DecisionAction::Redact, chosen);
+            record(decisions, known, item, DecisionAction::Redact, chosen);
             writeln!(stdout, "redact {}", chosen.as_str())?;
             Ok(Apply::Consumed)
         }
         Command::Keep => {
-            record(decisions, item, DecisionAction::Keep, item.category);
+            record(decisions, known, item, DecisionAction::Keep, item.category);
             writeln!(stdout, "keep")?;
             Ok(Apply::Consumed)
         }
         Command::Skip => {
-            record(decisions, item, DecisionAction::Skip, item.category);
+            record(decisions, known, item, DecisionAction::Skip, item.category);
             writeln!(stdout, "skip (remembered, no rule)")?;
             Ok(Apply::Consumed)
         }
         Command::AllRedact(category) => {
             for item in &items[index..] {
                 let chosen = category.unwrap_or(item.category);
-                record(decisions, item, DecisionAction::Redact, chosen);
+                record(decisions, known, item, DecisionAction::Redact, chosen);
             }
             writeln!(stdout, "redact {} from here", items.len() - index)?;
             Ok(Apply::Triage)
         }
         Command::AllKeep => {
             for item in &items[index..] {
-                record(decisions, item, DecisionAction::Keep, item.category);
+                record(decisions, known, item, DecisionAction::Keep, item.category);
             }
             writeln!(stdout, "keep {} from here", items.len() - index)?;
             Ok(Apply::Triage)
         }
         Command::AllSkip => {
             for item in &items[index..] {
-                record(decisions, item, DecisionAction::Skip, item.category);
+                record(decisions, known, item, DecisionAction::Skip, item.category);
             }
             writeln!(
                 stdout,
@@ -832,11 +839,11 @@ fn bucket(candidate: &Candidate) -> Bucket {
 
 fn record(
     decisions: &mut Vec<Decision>,
+    known: &mut HashSet<String>,
     candidate: &Candidate,
     action: DecisionAction,
     category: LearnCategory,
 ) {
-    decisions.retain(|existing| existing.key != candidate.key);
     let mut decision = Decision {
         key: candidate.key.clone(),
         action,
@@ -848,6 +855,14 @@ fn record(
     };
     if decision.sources.is_empty() && !candidate.context.is_empty() {
         decision.sources.push(candidate.context.clone());
+    }
+    remember(decisions, known, decision);
+}
+
+fn remember(decisions: &mut Vec<Decision>, known: &mut HashSet<String>, decision: Decision) {
+    if !known.insert(decision.key.clone()) {
+        let key = decision.key.clone();
+        decisions.retain(|existing| existing.key != key);
     }
     decisions.push(decision);
 }

@@ -90,7 +90,7 @@ Verify the settings before starting the proxy:
 ./target/release/symveil check --repo .
 ```
 
-`check` prints the config `proxy` will use and does not listen. The report names the config file, or says that none was found and defaults are in use. It names the repo root, the vault, and the audit log, and whether those files exist and are writable. It names the binary mode, which personal-data detectors are on, `internal_domains`, and the counts of `names.terms` and `names.people`. Counts only: the names are not printed. It names the learned-file path, whether that file loaded, its term count, and its mode, plus the upstream bases, the listen port, and whether the port is free.
+`check` prints the config `proxy` will use and does not listen. The report names the config file, or says that none was found and defaults are in use. It names the repo root, the vault, and the audit log, and whether those files exist and are writable. It names the binary mode, which personal-data detectors are on, `internal_domains`, and the counts of `names.terms` and `names.people`. Counts only: the names are not printed. It names the learned-file path, whether that file loaded, and its mode. The learned counts are the rows the proxy enforces: `terms` and `people` (name matcher), `secrets`, `emails`, `ips`, `hosts`, `domains`, and `symbols` (one literal automaton, plus any real regex), and `keeps` (allow list). `skips` are remembered and are not rules. Counts only: the values are not printed. The line also has the upstream bases, the listen port, and whether the port is free.
 
 Warnings are part of the report. The process still exits 0. `--strict` exits 2 when any warning is present:
 

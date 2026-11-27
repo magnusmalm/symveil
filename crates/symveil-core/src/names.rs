@@ -10,6 +10,9 @@
 //! own when the token is bounded by a non-alphanumeric character. A token
 //! does not match inside a longer word (`Ren` does not match `render`).
 
+use std::collections::HashMap;
+
+use aho_corasick::{AhoCorasick, MatchKind};
 use anyhow::{bail, Context, Result};
 use regex::Regex;
 
@@ -48,16 +51,13 @@ fn check_pattern(pattern: &UserPattern) -> Result<()> {
     Ok(())
 }
 
-struct Term {
-    letters: Vec<char>,
-}
-
 struct Person {
     tokens: Vec<Vec<char>>,
 }
 
 pub struct NameMasker {
-    terms: Vec<Term>,
+    /// One pattern per configured term: its lowercase letters.
+    term_ac: Option<AhoCorasick>,
     people: Vec<Person>,
     patterns: Vec<(String, Regex)>,
 }
@@ -65,13 +65,21 @@ pub struct NameMasker {
 impl NameMasker {
     pub fn compile(names: &NamesSection) -> Result<Self> {
         validate(names)?;
-        let terms = names
+        let patterns_for_terms: Vec<String> = names
             .terms
             .iter()
-            .map(|term| Term {
-                letters: term_letters(term),
-            })
+            .map(|term| term_letters(term).into_iter().collect())
             .collect();
+        let term_ac = if patterns_for_terms.is_empty() {
+            None
+        } else {
+            Some(
+                AhoCorasick::builder()
+                    .match_kind(MatchKind::Standard)
+                    .build(&patterns_for_terms)
+                    .context("compile name terms")?,
+            )
+        };
         let people = names
             .people
             .iter()
@@ -86,7 +94,7 @@ impl NameMasker {
             patterns.push((pattern.name.clone(), Regex::new(&pattern.regex)?));
         }
         Ok(Self {
-            terms,
+            term_ac,
             people,
             patterns,
         })
@@ -101,24 +109,7 @@ impl Masker for NameMasker {
     fn collect(&self, text: &str) -> Vec<Candidate> {
         let mut out = Vec::new();
         let chars: Vec<(usize, char)> = text.char_indices().collect();
-        for term in &self.terms {
-            let mut index = 0;
-            while index < chars.len() {
-                if !start_boundary(&chars, index) {
-                    index += 1;
-                    continue;
-                }
-                let Some(end) = match_term(text, &chars, index, &term.letters) else {
-                    index += 1;
-                    continue;
-                };
-                let start = chars[index].0;
-                out.push(candidate(start, end, "name-term"));
-                while index < chars.len() && chars[index].0 < end {
-                    index += 1;
-                }
-            }
-        }
+        self.collect_terms(text, &mut out);
         self.collect_people(&chars, &mut out);
         for (name, regex) in &self.patterns {
             for matched in regex.find_iter(text) {
@@ -133,6 +124,41 @@ impl Masker for NameMasker {
 }
 
 impl NameMasker {
+    fn collect_terms(&self, text: &str, out: &mut Vec<Candidate>) {
+        let Some(automaton) = &self.term_ac else {
+            return;
+        };
+        let laid = lay_letters(text);
+        let mut last_end: HashMap<usize, usize> = HashMap::new();
+        for mat in automaton.find_overlapping_iter(&laid.hay) {
+            let id = mat.pattern().as_usize();
+            let Some(start_letter) = laid.starts.get(mat.start()).copied().flatten() else {
+                continue;
+            };
+            let Some(end_letter) = laid.ends_at.get(mat.end()).copied().flatten() else {
+                continue;
+            };
+            let start = laid.pos[start_letter].start;
+            if start < last_end.get(&id).copied().unwrap_or(0) {
+                continue;
+            }
+            if !text[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !ch.is_alphanumeric())
+            {
+                continue;
+            }
+            let after = laid.pos[end_letter].end;
+            let end = trailing_separator(text, after + suffix_bytes(&text[after..]));
+            if !end_boundary(text, end) {
+                continue;
+            }
+            last_end.insert(id, end);
+            out.push(candidate(start, end, "name-term"));
+        }
+    }
+
     fn collect_people(&self, chars: &[(usize, char)], out: &mut Vec<Candidate>) {
         for person in &self.people {
             let mut index = 0;
@@ -218,31 +244,83 @@ fn is_separator(ch: char) -> bool {
     matches!(ch, '-' | '_' | '.')
 }
 
-fn match_term(
-    text: &str,
-    chars: &[(usize, char)],
+struct LaidLetters {
+    hay: String,
+    pos: Vec<LetterPos>,
+    /// Haystack byte -> letter index, for the first byte of each letter.
+    starts: Vec<Option<usize>>,
+    /// Haystack byte just past a letter -> that letter's index.
+    ends_at: Vec<Option<usize>>,
+}
+
+struct LetterPos {
     start: usize,
-    letters: &[char],
-) -> Option<usize> {
-    if letters.is_empty() {
-        return None;
-    }
-    let mut pos = start;
-    for (offset, &letter) in letters.iter().enumerate() {
-        if offset > 0 && pos < chars.len() && is_separator(chars[pos].1) {
-            pos += 1;
+    end: usize,
+}
+
+/// Letters the name matcher can walk, with `\0` where a gap is not zero or
+/// one separator. Term search is then one automaton pass.
+fn lay_letters(text: &str) -> LaidLetters {
+    let mut hay = String::with_capacity(text.len());
+    let mut pos = Vec::new();
+    let mut starts = Vec::new();
+    let mut ends_at = vec![None];
+    let mut prev_end: Option<usize> = None;
+    for (byte, ch) in text.char_indices() {
+        if !ch.is_alphanumeric() {
+            continue;
         }
-        if pos >= chars.len() || !same_letter(chars[pos].1, letter) {
-            return None;
+        let mut lower = ch.to_lowercase();
+        let Some(letter) = lower.next() else {
+            prev_end = Some(byte + ch.len_utf8());
+            continue;
+        };
+        let single = lower.next().is_none();
+        let end = byte + ch.len_utf8();
+        if !single {
+            push_break(&mut hay, &mut starts, &mut ends_at);
+            prev_end = Some(end);
+            continue;
         }
-        pos += 1;
+        if let Some(prev) = prev_end {
+            let gap = &text[prev..byte];
+            let soft = gap.is_empty()
+                || (gap.chars().count() == 1 && is_separator(gap.chars().next().unwrap_or(' ')));
+            if !soft {
+                push_break(&mut hay, &mut starts, &mut ends_at);
+            }
+        }
+        let index = pos.len();
+        let hay_start = hay.len();
+        hay.push(letter);
+        while starts.len() < hay.len() {
+            starts.push(None);
+        }
+        starts[hay_start] = Some(index);
+        if ends_at.len() < hay.len() + 1 {
+            ends_at.resize(hay.len() + 1, None);
+        }
+        ends_at[hay.len()] = Some(index);
+        pos.push(LetterPos { start: byte, end });
+        prev_end = Some(end);
     }
-    let after_letters = char_end(chars, pos - 1);
-    let end = trailing_separator(text, after_letters + suffix_bytes(&text[after_letters..]));
-    if !end_boundary(text, end) {
-        return None;
+    LaidLetters {
+        hay,
+        pos,
+        starts,
+        ends_at,
     }
-    Some(end)
+}
+
+fn push_break(hay: &mut String, starts: &mut Vec<Option<usize>>, ends_at: &mut Vec<Option<usize>>) {
+    if hay.is_empty() || hay.ends_with('\0') {
+        return;
+    }
+    hay.push('\0');
+    starts.push(None);
+    if ends_at.len() < hay.len() + 1 {
+        ends_at.resize(hay.len() + 1, None);
+    }
 }
 
 /// `exempla_` is the whole token. A separator followed by more letters, as in

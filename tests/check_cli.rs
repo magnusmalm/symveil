@@ -211,6 +211,11 @@ fn assert_shape(value: &Value) {
     assert!(value["names"].get("people").is_some());
     assert!(value["names"].get("values").is_none());
     assert!(value["learned"].get("terms").is_some());
+    assert!(value["learned"].get("people").is_some());
+    assert!(value["learned"].get("secrets").is_some());
+    assert!(value["learned"].get("hosts").is_some());
+    assert!(value["learned"].get("symbols").is_some());
+    assert!(value["learned"].get("skips").is_some());
     assert!(value["vault"].get("exists").is_some());
     assert!(value["vault"].get("writable").is_some());
     assert!(value["proxy"].get("timeout_secs").is_some());
