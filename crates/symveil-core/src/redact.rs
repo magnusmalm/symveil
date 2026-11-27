@@ -281,8 +281,15 @@ impl Engine {
 
     /// When the isolated value is not itself a token, rebuild `"key": "value"`
     /// and keep a redaction only if that probe masks the value and nothing else.
+    ///
+    /// The probe exists so assignment rules can see the label. Other keys
+    /// cannot change a whole-value hit, so they go straight to a scan of the
+    /// value. The bench hashes lock that distinction.
     fn labeled_value_hit(&mut self, key: &str, value: &str) -> Result<Option<Hit>> {
         if key.contains('"') || key.contains('\n') || value.contains('"') || value.contains('\n') {
+            return Ok(None);
+        }
+        if !label_might_cover_the_value(key, value) {
             return Ok(None);
         }
         let probe = format!("\"{key}\": \"{value}\"");
@@ -457,6 +464,28 @@ impl Engine {
         out.push_str(&text[cursor..]);
         Ok((out, hits))
     }
+}
+
+/// Assignment rules are the only detectors that need the key in order to mask
+/// the whole value. The check is wider than those patterns: a key that merely
+/// contains `pass` or ends in `_KEY` still takes the slow probe. A key outside
+/// this set cannot make `"key": "value"` redact `value` when `value` alone
+/// would not.
+fn label_might_cover_the_value(key: &str, value: &str) -> bool {
+    if value.len() < 8 {
+        return false;
+    }
+    let lower = key.to_ascii_lowercase();
+    if lower.contains("token")
+        || lower.contains("secret")
+        || lower.contains("pass")
+        || lower.contains("apikey")
+        || lower.contains("api_key")
+        || lower.contains("api-key")
+    {
+        return true;
+    }
+    key.to_ascii_uppercase().ends_with("_KEY")
 }
 
 fn policy_maps(
@@ -726,6 +755,36 @@ mod tests {
             restored_text.contains("key AKIAIOSFODNN7EXAMPLE"),
             "{restored_text}"
         );
+    }
+
+    #[test]
+    fn json_labels_that_are_not_assignments_skip_the_probe_without_changing_bytes() {
+        let mut engine = engine(RedactSection {
+            internal_domains: Vec::new(),
+            names: NamesSection {
+                terms: vec!["Qxvlig".into()],
+                ..NamesSection::default()
+            },
+            ..RedactSection::default()
+        });
+        let input = br#"{"password":"svcn-json-password-0001","FOO_TOKEN":"abcdEFGHijkl","SERVICE_KEY":"notarealkey0001","note":"Qxvlig stays a term","content":"plain text stays"}"#;
+        let (out, hits) = engine.redact_bytes(input).unwrap();
+        let value: Value = serde_json::from_slice(&out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("svcn-json-password-0001"), "{text}");
+        assert!(!text.contains("abcdEFGHijkl"), "{text}");
+        assert!(!text.contains("notarealkey0001"), "{text}");
+        assert!(!text.contains("Qxvlig"), "{text}");
+        assert_eq!(
+            value.get("content").and_then(Value::as_str),
+            Some("plain text stays")
+        );
+        assert!(hits
+            .iter()
+            .any(|hit| hit.original == "svcn-json-password-0001"));
+        assert!(hits.iter().any(|hit| hit.original == "abcdEFGHijkl"));
+        assert!(hits.iter().any(|hit| hit.original == "notarealkey0001"));
+        assert!(hits.iter().any(|hit| hit.original == "Qxvlig"));
     }
 
     #[test]

@@ -3,12 +3,16 @@
 //! This crate has no HTTP client and does not open sockets. Callers decide
 //! what to do with a span. Nothing here contacts a network.
 
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
+use aho_corasick::{AhoCorasick, MatchKind};
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
 use regex::{Captures, Regex};
+
+use crate::literals::{boundaries_ok, literal_pattern};
 
 const VALUE_MIN: usize = 8;
 
@@ -190,13 +194,22 @@ struct CompiledRule {
     filter_low_signal: bool,
 }
 
+struct LiteralRule {
+    name: String,
+    left_boundary: bool,
+    right_boundary: bool,
+}
+
 pub struct SecretSet {
     rules: Vec<CompiledRule>,
+    /// Escaped literals with optional `\b` edges. One automaton, not one regex each.
+    literals: Option<AhoCorasick>,
+    literal_rules: Vec<LiteralRule>,
 }
 
 impl SecretSet {
     pub fn compile(user: &[UserRule]) -> Result<Self> {
-        let mut rules = Vec::with_capacity(BUILTINS.len() + user.len());
+        let mut rules = Vec::with_capacity(BUILTINS.len());
         for builtin in BUILTINS {
             let regex = Regex::new(builtin.pattern)
                 .with_context(|| format!("builtin secret rule {}", builtin.name))?;
@@ -207,6 +220,8 @@ impl SecretSet {
                 filter_low_signal: builtin.filter_low_signal,
             });
         }
+        let mut literal_text = Vec::new();
+        let mut literal_rules = Vec::new();
         for pattern in user {
             if BUILTINS.iter().any(|builtin| builtin.name == pattern.name) {
                 anyhow::bail!(
@@ -218,6 +233,15 @@ impl SecretSet {
             if pattern.regex.is_empty() {
                 anyhow::bail!("secret rule '{}' has an empty regex", pattern.name);
             }
+            if let Some(literal) = literal_pattern(&pattern.regex) {
+                literal_text.push(literal.text);
+                literal_rules.push(LiteralRule {
+                    name: pattern.name.clone(),
+                    left_boundary: literal.left_boundary,
+                    right_boundary: literal.right_boundary,
+                });
+                continue;
+            }
             let regex = Regex::new(&pattern.regex)
                 .with_context(|| format!("secret rule '{}'", pattern.name))?;
             rules.push(CompiledRule {
@@ -227,7 +251,21 @@ impl SecretSet {
                 filter_low_signal: false,
             });
         }
-        Ok(Self { rules })
+        let literals = if literal_text.is_empty() {
+            None
+        } else {
+            Some(
+                AhoCorasick::builder()
+                    .match_kind(MatchKind::Standard)
+                    .build(literal_text)
+                    .context("compile learned literal rules")?,
+            )
+        };
+        Ok(Self {
+            rules,
+            literals,
+            literal_rules,
+        })
     }
 
     pub fn find(&self, text: &str) -> Vec<SecretHit> {
@@ -246,6 +284,32 @@ impl SecretSet {
                 hits.push(SecretHit {
                     start,
                     end,
+                    rule: rule.name.clone(),
+                });
+            }
+        }
+        if let Some(literals) = &self.literals {
+            let mut last_end: HashMap<usize, usize> = HashMap::new();
+            for mat in literals.find_overlapping_iter(text) {
+                let id = mat.pattern().as_usize();
+                let seen = last_end.get(&id).copied().unwrap_or(0);
+                if mat.start() < seen {
+                    continue;
+                }
+                let rule = &self.literal_rules[id];
+                if !boundaries_ok(
+                    text,
+                    mat.start(),
+                    mat.end(),
+                    rule.left_boundary,
+                    rule.right_boundary,
+                ) {
+                    continue;
+                }
+                last_end.insert(id, mat.end());
+                hits.push(SecretHit {
+                    start: mat.start(),
+                    end: mat.end(),
                     rule: rule.name.clone(),
                 });
             }
@@ -598,7 +662,7 @@ pub fn scan_secrets(text: &str) -> Vec<SecretHit> {
 
 #[cfg(test)]
 mod tests {
-    use super::{high_entropy_hits, scan_secrets};
+    use super::{high_entropy_hits, scan_secrets, SecretSet, UserRule};
 
     #[test]
     fn aws_example_key_is_a_builtin_secret() {
@@ -616,5 +680,35 @@ mod tests {
     fn uuid_is_not_high_entropy() {
         let token = "123e4567-e89b-12d3-a456-426614174000";
         assert!(high_entropy_hits(token).is_empty());
+    }
+
+    #[test]
+    fn literal_rules_use_one_matcher_and_keep_boundaries() {
+        let rules = vec![
+            UserRule {
+                name: "wrapped".into(),
+                regex: r"\bfoo\b".into(),
+            },
+            UserRule {
+                name: "glued".into(),
+                regex: r"bar\b".into(),
+            },
+            UserRule {
+                name: "code".into(),
+                regex: r"TDH\-\d+".into(),
+            },
+        ];
+        let set = SecretSet::compile(&rules).unwrap();
+        let text = "foo xfoo foo bar barx TDH-4471";
+        let hits = set.find(text);
+        let spans = |name: &str| -> Vec<(usize, usize)> {
+            hits.iter()
+                .filter(|hit| hit.rule == name)
+                .map(|hit| (hit.start, hit.end))
+                .collect()
+        };
+        assert_eq!(spans("wrapped"), vec![(0, 3), (9, 12)]);
+        assert_eq!(spans("glued"), vec![(13, 16)]);
+        assert_eq!(spans("code"), vec![(22, 30)]);
     }
 }

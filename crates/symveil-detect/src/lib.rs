@@ -6,4 +6,5 @@
 #![forbid(unsafe_code)]
 
 pub mod learned;
+pub mod literals;
 pub mod secrets;

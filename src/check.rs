@@ -94,8 +94,7 @@ struct LearnedView {
     path: Option<PathBuf>,
     configured: bool,
     loaded: bool,
-    terms: usize,
-    people: usize,
+    counts: LearnedCounts,
     mode: Option<u32>,
     problem: Option<LearnedProblem>,
 }
@@ -125,8 +124,7 @@ pub struct Report {
     learned_path: Option<String>,
     learned_configured: bool,
     learned_loaded: bool,
-    learned_terms: usize,
-    learned_people: usize,
+    learned_counts: LearnedCounts,
     learned_mode: Option<String>,
     openai_base: String,
     anthropic_base: String,
@@ -203,14 +201,7 @@ impl Report {
                 "terms": self.term_count,
                 "people": self.people_count,
             },
-            "learned": {
-                "path": self.learned_path,
-                "configured": self.learned_configured,
-                "loaded": self.learned_loaded,
-                "terms": self.learned_terms,
-                "people": self.learned_people,
-                "mode": self.learned_mode,
-            },
+            "learned": learned_json(self),
             "upstream": {
                 "openai_base": self.openai_base,
                 "anthropic_base": self.anthropic_base,
@@ -269,7 +260,19 @@ pub fn resolved_config_path(root: &Path, explicit: Option<&Path>) -> Option<Path
 /// Names and secrets stay counts. This does not bind the port and does not
 /// create the vault.
 pub fn startup_lines(root: &Path, cfg: &Config, config_path: Option<&Path>) -> String {
-    let learned = read_learned(cfg.learned_origin(root), None);
+    let origin = cfg.learned_origin(root);
+    let learned = if cfg.learned_loaded {
+        LearnedView {
+            path: origin.as_ref().map(|item| item.path.clone()),
+            configured: origin.as_ref().is_some_and(|item| item.configured),
+            loaded: true,
+            counts: cfg.learned_counts,
+            mode: origin.as_ref().and_then(|item| unix_mode(&item.path)),
+            problem: None,
+        }
+    } else {
+        read_learned(origin, None)
+    };
     let vault_mode = mode_of_file(&resolve_path(root, &cfg.proxy.vault));
     let warnings = collect_warnings(Facts {
         root,
@@ -353,8 +356,7 @@ pub fn inspect(request: &Request) -> Result<Report> {
         learned_path: learned.path.as_deref().map(display_path),
         learned_configured: learned.configured,
         learned_loaded: learned.loaded,
-        learned_terms: learned.terms,
-        learned_people: learned.people,
+        learned_counts: learned.counts,
         learned_mode: learned.mode.map(format_mode),
         openai_base: display_base(&cfg.proxy.openai_base),
         anthropic_base: display_base(&cfg.proxy.anthropic_base),
@@ -411,94 +413,88 @@ fn read_learned(origin: Option<LearnedOrigin>, merge_into: Option<&mut Config>) 
         return LearnedView::empty();
     };
     if !origin.path.exists() {
-        return LearnedView {
-            path: Some(origin.path),
-            configured: origin.configured,
-            loaded: false,
-            terms: 0,
-            people: 0,
-            mode: None,
-            problem: origin.configured.then_some(LearnedProblem::Missing),
-        };
+        return LearnedView::problem(
+            origin.path,
+            origin.configured,
+            None,
+            origin.configured.then_some(LearnedProblem::Missing),
+        );
     }
     if !origin.path.is_file() {
-        return LearnedView {
-            path: Some(origin.path),
-            configured: origin.configured,
-            loaded: false,
-            terms: 0,
-            people: 0,
-            mode: None,
-            problem: Some(LearnedProblem::Unreadable),
-        };
+        return LearnedView::problem(
+            origin.path,
+            origin.configured,
+            None,
+            Some(LearnedProblem::Unreadable),
+        );
     }
     let mode = unix_mode(&origin.path);
     let text = match fs::read_to_string(&origin.path) {
         Ok(text) => text,
         Err(_) => {
-            return LearnedView {
-                path: Some(origin.path),
-                configured: origin.configured,
-                loaded: false,
-                terms: 0,
-                people: 0,
+            return LearnedView::problem(
+                origin.path,
+                origin.configured,
                 mode,
-                problem: Some(LearnedProblem::Unreadable),
-            };
+                Some(LearnedProblem::Unreadable),
+            );
         }
     };
-    let Some(counts) = LearnedCounts::parse(&text).ok() else {
-        return LearnedView {
-            path: Some(origin.path),
-            configured: origin.configured,
-            loaded: false,
-            terms: 0,
-            people: 0,
-            mode,
-            problem: Some(LearnedProblem::Invalid),
-        };
-    };
-    // Startup already merged a parseable file. `check` merges a clone and
-    // keeps it only when the whole file applies.
+    // One parse. A failed merge leaves the caller's config unchanged.
     let loaded = if let Some(cfg) = merge_into {
-        merge_learned(cfg, &text)
+        let mut trial = cfg.clone();
+        match trial.apply_learned_toml(&text) {
+            Ok(()) => {
+                let counts = trial.learned_counts;
+                *cfg = trial;
+                Some(counts)
+            }
+            Err(_) => None,
+        }
     } else {
-        true
+        LearnedCounts::parse(&text).ok()
+    };
+    let Some(counts) = loaded else {
+        return LearnedView::problem(
+            origin.path,
+            origin.configured,
+            mode,
+            Some(LearnedProblem::Invalid),
+        );
     };
     LearnedView {
         path: Some(origin.path),
         configured: origin.configured,
-        loaded,
-        terms: counts.terms,
-        people: counts.people,
+        loaded: true,
+        counts,
         mode,
-        problem: if loaded {
-            None
-        } else {
-            Some(LearnedProblem::Invalid)
-        },
+        problem: None,
     }
-}
-
-fn merge_learned(cfg: &mut Config, text: &str) -> bool {
-    let mut trial = cfg.clone();
-    if trial.apply_learned_toml(text).is_err() {
-        return false;
-    }
-    *cfg = trial;
-    true
 }
 
 impl LearnedView {
     fn empty() -> Self {
+        Self::problem(PathBuf::new(), false, None, None)
+    }
+
+    fn problem(
+        path: PathBuf,
+        configured: bool,
+        mode: Option<u32>,
+        problem: Option<LearnedProblem>,
+    ) -> Self {
+        let path = if path.as_os_str().is_empty() {
+            None
+        } else {
+            Some(path)
+        };
         Self {
-            path: None,
-            configured: false,
+            path,
+            configured,
             loaded: false,
-            terms: 0,
-            people: 0,
-            mode: None,
-            problem: None,
+            counts: LearnedCounts::default(),
+            mode,
+            problem,
         }
     }
 }
@@ -1163,11 +1159,10 @@ fn learned_text(report: &Report) -> String {
         return "none".to_string();
     };
     format!(
-        "{path} configured={} loaded={} terms={} people={} mode={}",
+        "{path} configured={} loaded={} {} mode={}",
         yes(report.learned_configured),
         yes(report.learned_loaded),
-        report.learned_terms,
-        report.learned_people,
+        counts_text(&report.learned_counts),
         report.learned_mode.as_deref().unwrap_or("-")
     )
 }
@@ -1177,17 +1172,52 @@ fn learned_line(learned: &LearnedView) -> String {
         return "none".to_string();
     };
     format!(
-        "{} configured={} loaded={} terms={} people={} mode={}",
+        "{} configured={} loaded={} {} mode={}",
         display_path(path),
         yes(learned.configured),
         yes(learned.loaded),
-        learned.terms,
-        learned.people,
+        counts_text(&learned.counts),
         learned
             .mode
             .map(format_mode)
             .unwrap_or_else(|| "-".to_string())
     )
+}
+
+fn counts_text(counts: &LearnedCounts) -> String {
+    format!(
+        "terms={} people={} secrets={} emails={} ips={} hosts={} domains={} symbols={} skips={} keeps={}",
+        counts.terms,
+        counts.people,
+        counts.secrets,
+        counts.emails,
+        counts.ips,
+        counts.hosts,
+        counts.domains,
+        counts.symbols,
+        counts.skips,
+        counts.keeps
+    )
+}
+
+fn learned_json(report: &Report) -> Value {
+    let counts = &report.learned_counts;
+    serde_json::json!({
+        "path": report.learned_path,
+        "configured": report.learned_configured,
+        "loaded": report.learned_loaded,
+        "terms": counts.terms,
+        "people": counts.people,
+        "secrets": counts.secrets,
+        "emails": counts.emails,
+        "ips": counts.ips,
+        "hosts": counts.hosts,
+        "domains": counts.domains,
+        "symbols": counts.symbols,
+        "skips": counts.skips,
+        "keeps": counts.keeps,
+        "mode": report.learned_mode,
+    })
 }
 
 fn pii_text(report: &Report) -> String {

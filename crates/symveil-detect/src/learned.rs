@@ -57,7 +57,9 @@ pub struct LearnedFile {
     #[serde(default)]
     pub allow: LearnedAllow,
     /// Resume state for a later `symveil learn`. The proxy does not match on
-    /// these rows; it uses `names`, `secrets`, `symbols`, and `allow`.
+    /// these rows. It enforces `names.terms`, `names.people`, `secrets`
+    /// (secrets, emails, ips, hosts, and domains), `symbols`, and `allow`.
+    /// A `skip` row is remembered and is not a rule.
     #[serde(default)]
     pub decisions: Vec<DecisionRecord>,
 }

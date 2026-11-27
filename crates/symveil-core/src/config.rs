@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -7,6 +7,7 @@ use regex::Regex;
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use symveil_detect::learned::LearnedFile;
+use symveil_detect::literals::literal_pattern;
 
 #[path = "config_lenient.rs"]
 mod lenient;
@@ -417,10 +418,22 @@ pub struct LearnedOrigin {
 }
 
 /// Counts from a learned file. The strings are not returned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `terms` and `people` are the name matcher. `secrets`, `emails`, `ips`,
+/// `hosts`, `domains`, and `symbols` are rules the secret scanner enforces.
+/// `keeps` is the allow list. `skips` are resume rows and are not matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LearnedCounts {
     pub terms: usize,
     pub people: usize,
+    pub secrets: usize,
+    pub emails: usize,
+    pub ips: usize,
+    pub hosts: usize,
+    pub domains: usize,
+    pub symbols: usize,
+    pub skips: usize,
+    pub keeps: usize,
 }
 
 impl LearnedCounts {
@@ -431,11 +444,42 @@ impl LearnedCounts {
     pub fn parse(text: &str) -> Result<Self> {
         let file =
             LearnedFile::parse(text).map_err(|_| anyhow!("learned file could not be parsed"))?;
-        Ok(Self {
+        Ok(Self::from_file(&file))
+    }
+
+    pub fn from_file(file: &LearnedFile) -> Self {
+        let mut counts = Self {
             terms: file.names.terms.len(),
             people: file.names.people.len(),
-        })
+            symbols: file.symbols.len(),
+            keeps: file.allow.entries.len(),
+            skips: file
+                .decisions
+                .iter()
+                .filter(|decision| decision.action == "skip")
+                .count(),
+            ..Self::default()
+        };
+        for rule in &file.secrets {
+            match learned_rule_category(&rule.name) {
+                Some("email") => counts.emails += 1,
+                Some("ip") => counts.ips += 1,
+                Some("host") => counts.hosts += 1,
+                Some("domain") => counts.domains += 1,
+                Some("symbol") => counts.symbols += 1,
+                Some(_) | None => counts.secrets += 1,
+            }
+        }
+        counts
     }
+}
+
+fn learned_rule_category(name: &str) -> Option<&str> {
+    let (head, hash) = name.rsplit_once('-')?;
+    if hash.len() != 16 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    head.strip_prefix("learned-")
 }
 
 /// A config plus keys the strict parser would reject.
@@ -457,6 +501,12 @@ pub struct Config {
     /// Inline image, document, and file blocks. The default withholds them.
     #[serde(default)]
     pub binary: BinarySection,
+    /// Set when a learned file was merged. Not part of `.symveil.toml`.
+    #[serde(skip)]
+    pub learned_loaded: bool,
+    /// Counts from that file. Empty until a file loads.
+    #[serde(skip)]
+    pub learned_counts: LearnedCounts,
 }
 
 impl Config {
@@ -535,38 +585,52 @@ impl Config {
     /// Merge a `learned.toml` document into this config.
     pub fn apply_learned_toml(&mut self, text: &str) -> Result<()> {
         let file = LearnedFile::parse(text)?;
-        self.merge_learned(&file)
+        self.apply_learned_file(&file)
+    }
+
+    /// Merge an already-parsed learned file. Literals are not compiled here;
+    /// the secret scanner builds one automaton for them.
+    pub fn apply_learned_file(&mut self, file: &LearnedFile) -> Result<()> {
+        self.merge_learned(file)
     }
 
     fn merge_learned(&mut self, file: &LearnedFile) -> Result<()> {
+        let mut terms: HashSet<String> = self.redact.names.terms.iter().cloned().collect();
+        let mut people: HashSet<String> = self.redact.names.people.iter().cloned().collect();
+        let mut allow: HashSet<String> = self.redact.allow.iter().cloned().collect();
         for term in &file.names.terms {
-            push_unique(&mut self.redact.names.terms, term);
+            push_unique(&mut self.redact.names.terms, &mut terms, term);
         }
         for person in &file.names.people {
-            push_unique(&mut self.redact.names.people, person);
+            push_unique(&mut self.redact.names.people, &mut people, person);
         }
         for entry in &file.allow.entries {
-            push_unique(&mut self.redact.allow, entry);
+            push_unique(&mut self.redact.allow, &mut allow, entry);
         }
+        let mut names: HashSet<String> = self
+            .redact
+            .secrets
+            .iter()
+            .map(|rule| rule.name.clone())
+            .collect();
         for rule in file.secrets.iter().chain(file.symbols.iter()) {
-            if self
-                .redact
-                .secrets
-                .iter()
-                .any(|existing| existing.name == rule.name)
-            {
+            if !names.insert(rule.name.clone()) {
                 anyhow::bail!(
                     "learned rule `{}` uses the same name as a secret rule already in the config",
                     rule.name
                 );
             }
-            Regex::new(&rule.regex).with_context(|| format!("learned rule `{}`", rule.name))?;
+            if literal_pattern(&rule.regex).is_none() {
+                Regex::new(&rule.regex).with_context(|| format!("learned rule `{}`", rule.name))?;
+            }
             self.redact.secrets.push(SecretRule {
                 name: rule.name.clone(),
                 regex: rule.regex.clone(),
                 action: None,
             });
         }
+        self.learned_counts = LearnedCounts::from_file(file);
+        self.learned_loaded = true;
         self.validate()
     }
 
@@ -591,10 +655,11 @@ impl Config {
     }
 }
 
-fn push_unique(list: &mut Vec<String>, value: &str) {
-    if !value.is_empty() && !list.iter().any(|existing| existing == value) {
-        list.push(value.to_string());
+fn push_unique(list: &mut Vec<String>, seen: &mut HashSet<String>, value: &str) {
+    if value.is_empty() || !seen.insert(value.to_string()) {
+        return;
     }
+    list.push(value.to_string());
 }
 
 fn learned_env_path() -> Option<PathBuf> {
@@ -1146,6 +1211,10 @@ mod tests {
                 .unwrap();
         assert_eq!(counts.terms, 1);
         assert_eq!(counts.people, 1);
+        assert_eq!(counts.secrets, 0);
+        assert_eq!(counts.hosts, 0);
+        assert_eq!(counts.symbols, 0);
+        assert_eq!(counts.skips, 0);
         let err = LearnedCounts::parse("terms = [\"HiddenTermZZZ\"\n").unwrap_err();
         let message = format!("{err:#}");
         assert!(!message.contains("HiddenTermZZZ"), "{message}");
