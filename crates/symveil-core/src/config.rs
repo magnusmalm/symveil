@@ -36,6 +36,10 @@ fn default_audit() -> String {
     ".symveil/audit.jsonl".to_string()
 }
 
+fn default_audit_buffered() -> bool {
+    false
+}
+
 fn default_vault() -> String {
     ".symveil/vault.json".to_string()
 }
@@ -77,6 +81,11 @@ pub struct ProxySection {
     pub timeout_secs: u64,
     #[serde(default = "default_audit")]
     pub audit_log: String,
+    /// When false, each audit line is flushed before the proxy continues.
+    /// When true, lines stay in the process buffer until the proxy exits.
+    /// A crash can lose the last lines still in that buffer.
+    #[serde(default = "default_audit_buffered")]
+    pub audit_buffered: bool,
     #[serde(default = "default_vault")]
     pub vault: String,
 }
@@ -90,6 +99,7 @@ impl Default for ProxySection {
             anthropic_base: default_anthropic(),
             timeout_secs: default_timeout(),
             audit_log: default_audit(),
+            audit_buffered: default_audit_buffered(),
             vault: default_vault(),
         }
     }
@@ -709,6 +719,7 @@ mod tests {
     fn partial_proxy_section_keeps_defaults() {
         let cfg: Config = toml::from_str("[proxy]\nport = 9\n").unwrap();
         assert_eq!(cfg.proxy.port, 9);
+        assert!(!cfg.proxy.audit_buffered);
         assert_eq!(cfg.proxy.listen, "127.0.0.1");
         assert_eq!(cfg.proxy.openai_base, "https://api.openai.com");
         assert_eq!(cfg.redact.internal_domains, vec!["corp", "internal", "lan"]);
@@ -718,6 +729,15 @@ mod tests {
         assert!(cfg.redact.builtin_actions.is_empty());
         assert!(!cfg.redact.high_entropy);
         assert!(!cfg.redact.pii.enabled());
+    }
+
+    #[test]
+    fn audit_buffer_is_off_unless_set() {
+        assert!(!Config::default().proxy.audit_buffered);
+        let buffered: Config = toml::from_str("[proxy]\naudit_buffered = true\n").unwrap();
+        assert!(buffered.proxy.audit_buffered);
+        let line: Config = toml::from_str("[proxy]\naudit_buffered = false\n").unwrap();
+        assert!(!line.proxy.audit_buffered);
     }
 
     #[test]
@@ -1133,6 +1153,7 @@ mod tests {
             anthropic_base = "https://api.anthropic.invalid"
             timeout_secs = 900
             audit_log = ".symveil/audit.jsonl"
+            audit_buffered = false
             vault = ".symveil/vault.json"
 
             [binary]

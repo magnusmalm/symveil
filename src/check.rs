@@ -114,6 +114,7 @@ pub struct Report {
     repo: String,
     vault: FileState,
     audit_log: FileState,
+    audit_buffered: bool,
     binary_mode: String,
     pii_email: bool,
     pii_phone: bool,
@@ -149,6 +150,13 @@ impl Report {
         push_line(&mut out, "repo", &self.repo);
         push_line(&mut out, "vault", &file_value(&self.vault));
         push_line(&mut out, "audit", &file_value(&self.audit_log));
+        if self.audit_buffered {
+            push_line(
+                &mut out,
+                "audit_flush",
+                "buffered; a crash can lose the last lines still in the buffer",
+            );
+        }
         push_line(&mut out, "binaries", &self.binary_mode);
         push_line(&mut out, "pii", &pii_text(self));
         push_line(&mut out, "domains", &domains_text(&self.internal_domains));
@@ -190,6 +198,7 @@ impl Report {
             "repo": self.repo,
             "vault": file_json(&self.vault),
             "audit_log": file_json(&self.audit_log),
+            "audit_buffered": self.audit_buffered,
             "binary_mode": self.binary_mode,
             "pii": {
                 "email": self.pii_email,
@@ -219,6 +228,7 @@ impl Report {
                 "anthropic_base": self.anthropic_base,
                 "vault": self.vault.path,
                 "audit_log": self.audit_log.path,
+                "audit_buffered": self.audit_buffered,
                 "binary_mode": self.binary_mode,
                 "pii": {
                     "email": self.pii_email,
@@ -346,6 +356,7 @@ pub fn inspect(request: &Request) -> Result<Report> {
         repo: root.display().to_string(),
         vault,
         audit_log,
+        audit_buffered: cfg.proxy.audit_buffered,
         binary_mode: cfg.binary.mode.to_string(),
         pii_email: cfg.redact.pii.email,
         pii_phone: cfg.redact.pii.phone,

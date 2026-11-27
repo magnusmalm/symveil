@@ -80,6 +80,7 @@ fn proxy_schema() -> Schema {
         ("anthropic_base", Schema::Any),
         ("timeout_secs", Schema::Any),
         ("audit_log", Schema::Any),
+        ("audit_buffered", Schema::Any),
         ("vault", Schema::Any),
     ])
 }
