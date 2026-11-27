@@ -15,6 +15,7 @@ mod guard;
 mod model;
 mod offline;
 mod preview;
+mod progress;
 mod session;
 mod stoplist;
 mod store;
@@ -22,11 +23,14 @@ mod walk;
 
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 
 pub use model::{Decision, LearnCategory};
 pub use offline::assert_offline;
+pub use progress::stderr_is_tty;
 
 pub const DEFAULT_MAX_BYTES: u64 = 1024 * 1024;
 
@@ -49,6 +53,30 @@ pub struct Options {
     /// Also scan build directories other than `.git`, and text inside files
     /// that are normally skipped by extension.
     pub include_skipped: bool,
+    /// Glob patterns that are not scanned. Independent of the built-in
+    /// directory list and of `--include-skipped`.
+    pub exclude: Vec<String>,
+    pub progress: ProgressMode,
+    /// When stderr is a terminal, progress is redrawn in place.
+    pub progress_tty: bool,
+    /// A file at least this slow is named on stderr and in the report.
+    pub slow_threshold: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressMode {
+    Auto,
+    On,
+    Off,
+}
+
+impl ProgressMode {
+    fn enabled(self) -> bool {
+        match self {
+            Self::Auto | Self::On => true,
+            Self::Off => false,
+        }
+    }
 }
 
 /// CLI entry. Refuses to run when LLM or proxy endpoint variables are set.
@@ -61,6 +89,15 @@ pub fn run(opts: Options) -> Result<()> {
 
 /// Scan and, unless `report`, prompt. Does not read proxy settings.
 pub fn execute(opts: &Options, stdin: &mut dyn BufRead, stdout: &mut dyn Write) -> Result<()> {
+    execute_io(opts, stdin, stdout, progress::stderr_sink())
+}
+
+pub fn execute_io(
+    opts: &Options,
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn Write,
+    stderr: Box<dyn Write + Send>,
+) -> Result<()> {
     reject_url_path(&opts.root)?;
     let root = opts
         .root
@@ -76,11 +113,34 @@ pub fn execute(opts: &Options, stdin: &mut dyn BufRead, stdout: &mut dyn Write) 
             gitignore: opts.gitignore,
             follow_symlinks: opts.follow_symlinks,
             include_skipped: opts.include_skipped,
+            exclude: opts.exclude.clone(),
         },
     )?;
-    let mut candidates = extract::extract(&walked.files);
+    let total_bytes = walked.files.iter().map(|file| file.text.len() as u64).sum();
+    let ticker = progress::Progress::start(
+        opts.progress.enabled(),
+        opts.progress_tty,
+        walked.files.len(),
+        total_bytes,
+        opts.slow_threshold,
+        stderr,
+    );
+    let parts: Vec<extract::Prepared> = walked
+        .files
+        .par_iter()
+        .map(|file| {
+            ticker.note_current(&file.relative);
+            let started = std::time::Instant::now();
+            let prepared = extract::prepare(&file.text);
+            ticker.finish_file(&file.relative, file.text.len() as u64, started.elapsed());
+            prepared
+        })
+        .collect();
+    ticker.finish();
+    let slow = ticker.slow_files();
+    let mut candidates = extract::candidates_from(&walked.files, parts);
     if opts.report {
-        report::write_report(&walked, &candidates, opts.reveal, stdout)?;
+        report::write_report(&walked, &candidates, opts.reveal, &slow, stdout)?;
         return Ok(());
     }
     let out = output_path(opts)?;
@@ -179,6 +239,7 @@ mod report {
         walked: &Walked,
         candidates: &[Candidate],
         reveal: bool,
+        slow: &[crate::progress::SlowFile],
         stdout: &mut dyn Write,
     ) -> Result<()> {
         let stats = &walked.stats;
@@ -225,6 +286,90 @@ mod report {
                 candidate.occurrences, candidate.files, candidate.first_file, candidate.first_line
             )?;
         }
+        crate::progress::write_slow_summary(slow, stdout)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use std::io::Cursor;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use super::*;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "symveil-learn-scan-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn options(root: PathBuf, progress: ProgressMode, slow: Duration) -> Options {
+        Options {
+            root,
+            out: None,
+            report: true,
+            reveal: false,
+            max_bytes: DEFAULT_MAX_BYTES,
+            gitignore: true,
+            follow_symlinks: false,
+            include_skipped: false,
+            exclude: Vec::new(),
+            progress,
+            progress_tty: false,
+            slow_threshold: slow,
+        }
+    }
+
+    #[test]
+    fn a_zero_threshold_names_the_slow_file() {
+        let root = temp_dir("slow");
+        std::fs::write(root.join("slow.txt"), "fn tundrahorn_fan_init() {}\n").unwrap();
+        let opts = options(root.clone(), ProgressMode::Off, Duration::ZERO);
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut stdout = Vec::new();
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        execute_io(
+            &opts,
+            &mut stdin,
+            &mut stdout,
+            Box::new(progress::SharedBuf::new(Arc::clone(&buf))),
+        )
+        .unwrap();
+        let stderr = String::from_utf8(buf.lock().expect("stderr").clone()).unwrap();
+        let report = String::from_utf8(stdout).unwrap();
+        assert!(stderr.contains("slow file"), "{stderr}");
+        assert!(stderr.contains("slow.txt"), "{stderr}");
+        assert!(report.contains("slow files:"), "{report}");
+        assert!(!report.contains("symveil learn:"), "{report}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn quiet_scan_omits_the_ticker() {
+        let root = temp_dir("quiet");
+        std::fs::write(root.join("keep.txt"), "fn tundrahorn_fan_init() {}\n").unwrap();
+        let opts = options(root.clone(), ProgressMode::Off, Duration::from_secs(2));
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut stdout = Vec::new();
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        execute_io(
+            &opts,
+            &mut stdin,
+            &mut stdout,
+            Box::new(progress::SharedBuf::new(Arc::clone(&buf))),
+        )
+        .unwrap();
+        let stderr = String::from_utf8(buf.lock().expect("stderr").clone()).unwrap();
+        assert!(!stderr.contains("symveil learn:"), "quiet stderr: {stderr}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

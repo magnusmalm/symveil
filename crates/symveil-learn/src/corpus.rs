@@ -696,6 +696,7 @@ fn options(include_skipped: bool) -> WalkOptions {
         gitignore: true,
         follow_symlinks: false,
         include_skipped,
+        exclude: Vec::new(),
     }
 }
 
