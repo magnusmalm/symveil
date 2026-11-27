@@ -134,3 +134,80 @@ fn interactive_stdin_writes_a_private_file_the_proxy_loads() {
         .any(|person| person == "Ren Testdotter"));
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn quiet_suppresses_progress_and_a_pipe_does_not_print_secrets() {
+    let root = temp_dir("progress");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("src/fan.rs"),
+        "const KEY: &str = \"AKIAIOSFODNN7EXAMPLE\";\nfn tundrahorn_fan_init() {}\n",
+    )
+    .unwrap();
+    let quiet = command(&root.join("home"))
+        .args(["learn", "--quiet", "--report", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let quiet_err = String::from_utf8(quiet.stderr).unwrap();
+    assert!(quiet.status.success(), "{quiet_err}");
+    assert!(
+        !quiet_err.contains("symveil learn:"),
+        "quiet printed progress: {quiet_err}"
+    );
+    let shown = command(&root.join("home"))
+        .args(["learn", "--report", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(shown.stderr).unwrap();
+    assert!(shown.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("symveil learn:"),
+        "expected a progress line: {stderr}"
+    );
+    assert!(
+        !stderr.contains("AKIAIOSFODNN7EXAMPLE"),
+        "progress printed a secret: {stderr}"
+    );
+    let both = command(&root.join("home"))
+        .args([
+            "learn",
+            "--quiet",
+            "--progress",
+            "--report",
+            root.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!both.status.success());
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn exclude_glob_skips_a_bsp_directory() {
+    let root = temp_dir("exclude");
+    fs::create_dir_all(root.join("bsp/kernel")).unwrap();
+    fs::write(
+        root.join("bsp/kernel/board.c"),
+        "int tundrahorn_board_init(void) { return 0; }\n",
+    )
+    .unwrap();
+    fs::write(root.join("keep.rs"), "fn exempla_keep() {}\n").unwrap();
+    let output = command(&root.join("home"))
+        .args([
+            "learn",
+            "--quiet",
+            "--report",
+            "--exclude",
+            "bsp/**",
+            root.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success(), "{stderr}\n{stdout}");
+    assert!(stdout.contains("exempla_keep"), "{stdout}");
+    assert!(!stdout.contains("tundrahorn_board_init"), "{stdout}");
+    assert!(stdout.contains("skipped by --exclude"), "{stdout}");
+    let _ = fs::remove_dir_all(&root);
+}

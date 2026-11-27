@@ -8,6 +8,20 @@ static STOPPED: LazyLock<std::collections::HashSet<&'static str>> =
     LazyLock::new(|| WORDS.iter().copied().collect());
 
 pub fn is_stopped(word: &str) -> bool {
+    // The stop list is short ASCII words. Avoid a heap allocation on the
+    // per-token path, which runs once for every identifier in the tree.
+    const MAX: usize = 32;
+    if word.len() > MAX {
+        return false;
+    }
+    if word.is_ascii() {
+        let mut buf = [0u8; MAX];
+        for (index, byte) in word.bytes().enumerate() {
+            buf[index] = byte.to_ascii_lowercase();
+        }
+        let lower = std::str::from_utf8(&buf[..word.len()]).unwrap_or("");
+        return STOPPED.contains(lower);
+    }
     let lower = word.to_ascii_lowercase();
     STOPPED.contains(lower.as_str())
 }
@@ -787,6 +801,13 @@ const CALENDAR: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::{is_calendar, is_common, is_stopped};
+
+    #[test]
+    fn stop_words_fit_the_stack_buffer() {
+        for word in super::WORDS {
+            assert!(word.len() <= 32, "{word}");
+        }
+    }
 
     #[test]
     fn keywords_and_ordinary_code_words_are_stopped() {

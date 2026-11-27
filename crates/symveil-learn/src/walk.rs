@@ -44,6 +44,9 @@ pub struct WalkOptions {
     /// Read build directories other than `.git`, and pull text out of files
     /// whose extension is normally skipped (pdf, png, zip, and the rest).
     pub include_skipped: bool,
+    /// Glob patterns. A match is not descended into and is not read.
+    /// This is independent of the built-in directory list.
+    pub exclude: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -54,6 +57,7 @@ pub struct WalkStats {
     pub large: usize,
     pub binary: usize,
     pub unreadable: usize,
+    pub excluded: usize,
     pub ext_skips: BTreeMap<String, usize>,
     pub dir_skips: BTreeMap<String, usize>,
 }
@@ -80,9 +84,10 @@ struct GitRule {
 }
 
 pub fn walk(root: &Path, opts: &WalkOptions) -> Result<Walked> {
+    let excludes = compile_excludes(&opts.exclude)?;
     let mut walked = Walked::default();
     let mut seen = HashSet::new();
-    walk_dir(root, root, opts, &[], &mut seen, &mut walked)?;
+    walk_dir(root, root, opts, &excludes, &[], &mut seen, &mut walked)?;
     walked.files.sort_by(|a, b| a.relative.cmp(&b.relative));
     Ok(walked)
 }
@@ -91,6 +96,7 @@ fn walk_dir(
     root: &Path,
     dir: &Path,
     opts: &WalkOptions,
+    excludes: &[ExcludeRule],
     inherited: &[GitRule],
     seen: &mut HashSet<PathBuf>,
     walked: &mut Walked,
@@ -145,7 +151,7 @@ fn walk_dir(
                 walked.stats.symlinks += 1;
                 continue;
             }
-            follow_link(root, &path, &name, opts, &rules, seen, walked)?;
+            follow_link(root, &path, opts, excludes, &rules, seen, walked)?;
             continue;
         }
         if meta.is_dir() {
@@ -159,12 +165,16 @@ fn walk_dir(
                     walked.stats.gitignore += 1;
                     continue;
                 }
+                if excluded(excludes, &rel, true) {
+                    walked.stats.excluded += 1;
+                    continue;
+                }
             }
-            walk_dir(root, &path, opts, &rules, seen, walked)?;
+            walk_dir(root, &path, opts, excludes, &rules, seen, walked)?;
             continue;
         }
         if meta.is_file() {
-            consider_file(root, &path, meta.len(), &rules, opts, walked);
+            consider_file(root, &path, meta.len(), &rules, excludes, opts, walked);
         }
     }
     Ok(())
@@ -173,12 +183,16 @@ fn walk_dir(
 fn follow_link(
     root: &Path,
     path: &Path,
-    name: &str,
     opts: &WalkOptions,
+    excludes: &[ExcludeRule],
     rules: &[GitRule],
     seen: &mut HashSet<PathBuf>,
     walked: &mut Walked,
 ) -> Result<()> {
+    let name = path
+        .file_name()
+        .and_then(|item| item.to_str())
+        .unwrap_or("");
     let canon = match fs::canonicalize(path) {
         Ok(canon) => canon,
         Err(_) => {
@@ -203,11 +217,11 @@ fn follow_link(
             walked.stats.dirs += 1;
             return Ok(());
         }
-        walk_dir(root, &canon, opts, rules, seen, walked)?;
+        walk_dir(root, &canon, opts, excludes, rules, seen, walked)?;
         return Ok(());
     }
     if meta.is_file() {
-        consider_file(root, &canon, meta.len(), rules, opts, walked);
+        consider_file(root, &canon, meta.len(), rules, excludes, opts, walked);
     }
     Ok(())
 }
@@ -217,6 +231,7 @@ fn consider_file(
     path: &Path,
     len: u64,
     rules: &[GitRule],
+    excludes: &[ExcludeRule],
     opts: &WalkOptions,
     walked: &mut Walked,
 ) {
@@ -226,6 +241,10 @@ fn consider_file(
     };
     if ignored(rules, &rel, false) {
         walked.stats.gitignore += 1;
+        return;
+    }
+    if excluded(excludes, &rel, false) {
+        walked.stats.excluded += 1;
         return;
     }
     if len > opts.max_bytes {
@@ -295,14 +314,75 @@ pub fn skip_summary(stats: &WalkStats) -> String {
             .collect();
         lines.push(format!("skipped dirs: {}", parts.join(", ")));
     }
+    let builtin = !lines.is_empty();
+    if stats.excluded > 0 {
+        lines.push(format!("skipped by --exclude: {}", stats.excluded));
+    }
     if lines.is_empty() {
         return String::new();
     }
-    lines.push(
-        "These were not scanned. Pass --include-skipped to read build directories and text inside those files."
-            .to_string(),
-    );
+    if builtin {
+        lines.push(
+            "These were not scanned. Pass --include-skipped to read build directories and text inside those files."
+                .to_string(),
+        );
+    }
+    if stats.excluded > 0 {
+        lines.push("Patterns passed to --exclude were not scanned.".to_string());
+    }
     lines.join("\n")
+}
+
+struct ExcludeRule {
+    regex: Regex,
+    dir_only: bool,
+}
+
+fn compile_excludes(patterns: &[String]) -> Result<Vec<ExcludeRule>> {
+    let mut rules = Vec::with_capacity(patterns.len());
+    for pattern in patterns {
+        let trimmed = pattern.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("--exclude pattern is empty");
+        }
+        let dir_only = trimmed.ends_with('/');
+        let body = trimmed.trim_end_matches('/').trim_start_matches('/');
+        if body.is_empty() {
+            anyhow::bail!("--exclude pattern `{pattern}` is empty");
+        }
+        let anchored = pattern.contains('/');
+        let regex = glob_to_regex(body, anchored)
+            .map_err(|err| anyhow::anyhow!("--exclude `{pattern}`: {err}"))?;
+        rules.push(ExcludeRule { regex, dir_only });
+    }
+    Ok(rules)
+}
+
+fn excluded(rules: &[ExcludeRule], rel: &str, is_dir: bool) -> bool {
+    if rules.is_empty() || rel.is_empty() {
+        return false;
+    }
+    if rules.iter().any(|rule| rule.matches(rel, is_dir)) {
+        return true;
+    }
+    if !is_dir {
+        return false;
+    }
+    let mut child = String::with_capacity(rel.len() + 2);
+    child.push_str(rel);
+    child.push_str("/x");
+    rules
+        .iter()
+        .any(|rule| !rule.dir_only && rule.regex.is_match(&child))
+}
+
+impl ExcludeRule {
+    fn matches(&self, rel: &str, is_dir: bool) -> bool {
+        if self.dir_only && !is_dir {
+            return false;
+        }
+        self.regex.is_match(rel)
+    }
 }
 
 fn text_from_bytes(bytes: &[u8]) -> Option<String> {
@@ -529,6 +609,7 @@ mod tests {
                 gitignore: true,
                 follow_symlinks: false,
                 include_skipped: false,
+                exclude: Vec::new(),
             },
         )
         .unwrap();
@@ -570,6 +651,7 @@ mod tests {
                 gitignore: false,
                 follow_symlinks: false,
                 include_skipped: false,
+                exclude: Vec::new(),
             },
         )
         .unwrap();
@@ -600,6 +682,7 @@ mod tests {
                 gitignore: true,
                 follow_symlinks: false,
                 include_skipped: false,
+                exclude: Vec::new(),
             },
         )
         .unwrap();
@@ -615,6 +698,7 @@ mod tests {
                 gitignore: true,
                 follow_symlinks: false,
                 include_skipped: true,
+                exclude: Vec::new(),
             },
         )
         .unwrap();
@@ -629,6 +713,94 @@ mod tests {
         assert!(!joined
             .chars()
             .any(|ch| ch == '\0' || (ch.is_control() && ch != '\n')));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn plain_options(include_skipped: bool, exclude: Vec<String>) -> WalkOptions {
+        WalkOptions {
+            max_bytes: 1024 * 1024,
+            gitignore: true,
+            follow_symlinks: false,
+            include_skipped,
+            exclude,
+        }
+    }
+
+    #[test]
+    fn builtin_dirs_are_skipped_without_a_git_repo() {
+        let root = temp_tree("nongit");
+        for dir in [
+            "build",
+            "node_modules",
+            "dist",
+            "target",
+            "vendor",
+            ".venv",
+            "__pycache__",
+        ] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+            fs::write(root.join(dir).join("secret.txt"), format!("MARKER_{dir}\n")).unwrap();
+        }
+        fs::write(root.join("keep.txt"), "keep-me\n").unwrap();
+        assert!(!root.join(".git").exists());
+        let walked = walk(&root, &plain_options(false, Vec::new())).unwrap();
+        let joined = walked
+            .files
+            .iter()
+            .map(|file| file.text.clone())
+            .collect::<String>();
+        assert!(joined.contains("keep-me"));
+        assert!(!joined.contains("MARKER_"), "{joined}");
+        assert_eq!(walked.stats.gitignore, 0);
+        let summary = skip_summary(&walked.stats);
+        for name in [
+            "build/",
+            "node_modules/",
+            "dist/",
+            "target/",
+            "vendor/",
+            ".venv/",
+            "__pycache__/",
+        ] {
+            assert!(summary.contains(name), "{summary}");
+        }
+        assert!(summary.contains("--include-skipped"), "{summary}");
+        let included = walk(&root, &plain_options(true, Vec::new())).unwrap();
+        let joined = included
+            .files
+            .iter()
+            .map(|file| file.text.clone())
+            .collect::<String>();
+        assert!(joined.contains("MARKER_vendor"), "{joined}");
+        assert!(joined.contains("MARKER_build"), "{joined}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn exclude_globs_skip_matches_and_are_not_undone() {
+        let root = temp_tree("exclude");
+        fs::create_dir_all(root.join("bsp/kernel")).unwrap();
+        fs::write(root.join("bsp/kernel/board.c"), "BOARD_C\n").unwrap();
+        fs::write(root.join("notes.patch"), "PATCH_TEXT\n").unwrap();
+        fs::write(root.join("keep.c"), "KEEP_C\n").unwrap();
+        let exclude = vec!["*.patch".to_string(), "bsp/**".to_string()];
+        let walked = walk(&root, &plain_options(true, exclude)).unwrap();
+        let joined = walked
+            .files
+            .iter()
+            .map(|file| file.text.clone())
+            .collect::<String>();
+        assert!(joined.contains("KEEP_C"), "{joined}");
+        assert!(!joined.contains("BOARD_C"), "{joined}");
+        assert!(!joined.contains("PATCH_TEXT"), "{joined}");
+        assert!(walked.stats.excluded >= 2);
+        let summary = skip_summary(&walked.stats);
+        assert!(summary.contains("skipped by --exclude"), "{summary}");
+        assert!(
+            !summary.contains("--include-skipped"),
+            "exclude-only summary should not suggest --include-skipped: {summary}"
+        );
+        assert!(walk(&root, &plain_options(false, vec![" ".to_string()])).is_err());
         let _ = fs::remove_dir_all(&root);
     }
 }

@@ -8,6 +8,7 @@ license = "Apache-2.0"
 
 [dependencies]
 anyhow = "1"
+rayon = "1"
 regex = "1"
 symveil-detect = { path = "../symveil-detect" }
 

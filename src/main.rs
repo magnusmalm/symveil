@@ -148,6 +148,18 @@ struct LearnArgs {
     /// skipped by extension (pdf, png, zip, and the rest).
     #[arg(long)]
     include_skipped: bool,
+    /// Skip paths matching this glob. Repeat for more than one pattern.
+    /// A pattern without `/` matches a file or directory name anywhere.
+    /// A pattern with `/` is relative to the scan root. This is not undone
+    /// by `--include-skipped`.
+    #[arg(long, action = clap::ArgAction::Append)]
+    exclude: Vec<String>,
+    /// Do not print scan progress.
+    #[arg(long)]
+    quiet: bool,
+    /// Print scan progress even when this flag is the only progress switch.
+    #[arg(long)]
+    progress: bool,
 }
 
 #[derive(clap::Args)]
@@ -161,7 +173,14 @@ struct TextArgs {
 fn main() {
     let cli = Cli::parse();
     let result = match cli.cmd {
-        Command::Learn(args) => symveil_learn::run(learn_options(args)).map(|()| 0),
+        Command::Learn(args) => if args.quiet && args.progress {
+            Err(anyhow::anyhow!(
+                "--quiet and --progress cannot be used together"
+            ))
+        } else {
+            symveil_learn::run(learn_options(args))
+        }
+        .map(|()| 0),
         Command::Check(args) => cmd_check(args),
         other => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -182,6 +201,13 @@ fn main() {
 }
 
 fn learn_options(args: LearnArgs) -> LearnOptions {
+    let progress = if args.quiet {
+        symveil_learn::ProgressMode::Off
+    } else if args.progress {
+        symveil_learn::ProgressMode::On
+    } else {
+        symveil_learn::ProgressMode::Auto
+    };
     LearnOptions {
         root: args.path,
         out: args.out,
@@ -191,6 +217,10 @@ fn learn_options(args: LearnArgs) -> LearnOptions {
         gitignore: !args.no_gitignore,
         follow_symlinks: args.follow_symlinks,
         include_skipped: args.include_skipped,
+        exclude: args.exclude,
+        progress,
+        progress_tty: symveil_learn::stderr_is_tty(),
+        slow_threshold: std::time::Duration::from_secs(2),
     }
 }
 
