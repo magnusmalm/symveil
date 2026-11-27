@@ -1276,12 +1276,16 @@ fn source_line(text: &str, lines: &LineMap, start: usize, end: usize) -> String 
     if line.len() <= 240 || (line.len() <= 960 && line.chars().take(241).count() <= 240) {
         return line.to_string();
     }
-    let value = text.get(start..end.min(text.len())).unwrap_or("");
-    let Some(pos) = line.find(value) else {
+    // `start` is the hit. Searching the line for the text walks from the
+    // left, so a repeated token on a minified line costs a scan per hit and
+    // the window lands on the earlier copy.
+    let pos = start.saturating_sub(line_start);
+    if pos > line.len() {
         return line.chars().take(240).collect();
-    };
+    }
+    let value_len = end.saturating_sub(start).min(line.len() - pos);
     let from = floor_boundary(line, pos.saturating_sub(60));
-    let to = ceil_boundary(line, (pos + value.len() + 60).min(line.len()));
+    let to = ceil_boundary(line, (pos + value_len + 60).min(line.len()));
     line[from..to].to_string()
 }
 
@@ -1663,6 +1667,29 @@ fn return_value() {}
         assert!(
             has(&found, LearnCategory::Host, "git.tdh.corp"),
             "{found:?}"
+        );
+    }
+
+    #[test]
+    fn long_line_context_follows_this_hit() {
+        let mut text = "word ".repeat(300);
+        text.push_str("Tundrahorn ");
+        text.push_str(&"word ".repeat(300));
+        text.push_str("LATEMARKER Tundrahorn ");
+        text.push_str(&"word ".repeat(80));
+        assert!(!text.contains('\n'));
+        assert!(text.len() > 960, "{}", text.len());
+        let found = only(&text);
+        let hit = found
+            .iter()
+            .find(|candidate| candidate.text == "Tundrahorn")
+            .unwrap_or_else(|| panic!("{found:?}"));
+        assert!(
+            hit.sources
+                .iter()
+                .any(|src| src.contains("LATEMARKER") && src.contains("Tundrahorn")),
+            "sources stayed on the first copy: {:?}",
+            hit.sources
         );
     }
 
