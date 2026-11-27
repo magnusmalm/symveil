@@ -84,6 +84,30 @@ printf '%s\n' 'export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE' \
 
 `redact` writes the masked text to stdout and a count to stderr. `restore` reverses a placeholder stream. The proxy is what an agent should use.
 
+Verify the settings before starting the proxy:
+
+```bash
+./target/release/symveil check --repo .
+```
+
+`check` prints the config `proxy` will use and does not listen. The report names the config file, or says that none was found and defaults are in use. It names the repo root, the vault, and the audit log, and whether those files exist and are writable. It names the binary mode, which personal-data detectors are on, `internal_domains`, and the counts of `names.terms` and `names.people`. Counts only: the names are not printed. It names the learned-file path, whether that file loaded, its term count, and its mode, plus the upstream bases, the listen port, and whether the port is free.
+
+Warnings are part of the report. The process still exits 0. `--strict` exits 2 when any warning is present:
+
+- binary mode is `pass`
+- no config file was found
+- a learned file is configured but missing or unreadable
+- the learned file or the vault is more permissive than mode `0600`
+- the learned file, the vault, or the config is tracked by git or would be committed
+- personal-data detectors are off
+- `names.terms` is empty
+- an upstream base is not `https` and not a loopback host
+- the config has an unknown key
+
+`--json` prints the same report as JSON. `--sample notes.txt` (or `--sample -` for stdin) counts replacements by category and does not print the input. `--reveal` with `--sample` prints the matched values and marks that output local only. Do not share `--reveal` output.
+
+`symveil proxy --check` and `symveil proxy --dry-run` print this report and exit. Starting the proxy prints a shorter form of the same summary.
+
 Run the proxy:
 
 ```bash

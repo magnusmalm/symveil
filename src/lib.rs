@@ -9,6 +9,8 @@
 
 mod plugins;
 
+pub mod check;
+
 pub use symveil_core::{
     audit, category, config, masker, proxy, redact, scan, secrets, stream, vault, Category, Config,
     Engine, Hit, Masker, Vault,

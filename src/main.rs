@@ -1,3 +1,4 @@
+use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use symveil::audit::AuditLog;
 use symveil::build_engine;
 #[cfg(feature = "identifiers")]
 use symveil::category::Category;
+use symveil::check;
 use symveil::config::{resolve_path, Action, Config};
 use symveil::proxy::{self, AppState};
 use symveil::redact::{self as policy, Hit};
@@ -38,6 +40,12 @@ enum Command {
     Index(IndexArgs),
     /// Proxy OpenAI and Anthropic APIs, redacting requests and restoring responses.
     Proxy(ProxyArgs),
+    /// Show what the proxy will do, without listening.
+    ///
+    /// The report lists effective settings and warnings. Names and secrets are
+    /// counts, not values. Exit status is 0, or 2 with `--strict` when a
+    /// warning is present.
+    Check(CheckArgs),
     /// Redact stdin to stdout using the vault and policy.
     Redact(TextArgs),
     /// Restore placeholders on stdin back to the original text.
@@ -83,6 +91,34 @@ struct ProxyArgs {
     /// Anthropic origin, without a trailing /v1.
     #[arg(long)]
     anthropic_base: Option<String>,
+    /// Print the check summary and exit. Does not listen.
+    #[arg(long)]
+    check: bool,
+    /// Same as `--check`.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(clap::Args)]
+struct CheckArgs {
+    /// Repository root used to find the vault and config.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    /// Path to .symveil.toml. Defaults to the nearest file at or above the repo.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Print the report as JSON.
+    #[arg(long)]
+    json: bool,
+    /// Exit 2 when any warning is present.
+    #[arg(long)]
+    strict: bool,
+    /// Redact this file, or `-` for stdin, and print counts by category.
+    #[arg(long, value_name = "FILE")]
+    sample: Option<String>,
+    /// With `--sample`, print matched values. Local only. Do not share the output.
+    #[arg(long)]
+    reveal: bool,
 }
 
 #[derive(clap::Args)]
@@ -157,17 +193,23 @@ fn main() {
                 symveil_learn::run(learn_options(args))
             }
         }
+        .map(|()| 0),
+        Command::Check(args) => cmd_check(args),
         other => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .expect("tokio runtime");
-            runtime.block_on(run_network(other))
+            runtime.block_on(run_network(other)).map(|()| 0)
         }
     };
-    if let Err(err) = result {
-        eprintln!("symveil: {err:#}");
-        std::process::exit(1);
+    match result {
+        Ok(0) => {}
+        Ok(code) => std::process::exit(code),
+        Err(err) => {
+            eprintln!("symveil: {err:#}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -204,6 +246,7 @@ async fn run_network(cmd: Command) -> Result<()> {
         Command::Proxy(args) => cmd_proxy(args).await,
         Command::Redact(args) => cmd_text(args, true),
         Command::Restore(args) => cmd_text(args, false),
+        Command::Check(_) => anyhow::bail!("check is not a networked command"),
         Command::Learn(_) => anyhow::bail!("learn is not a networked command"),
     }
 }
@@ -317,6 +360,21 @@ fn print_report(report: &IndexReport, verbose: bool) {
 }
 
 async fn cmd_proxy(args: ProxyArgs) -> Result<()> {
+    if args.check || args.dry_run {
+        let report = check::inspect(&check::Request {
+            repo: args.repo.clone(),
+            config: args.config.clone(),
+            sample: None,
+            reveal: false,
+            port: args.port,
+            openai_base: args.openai_base.clone(),
+            anthropic_base: args.anthropic_base.clone(),
+        })?;
+        print!("{}", report.to_text());
+        io::stdout().flush()?;
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -384,8 +442,56 @@ async fn cmd_proxy(args: ProxyArgs) -> Result<()> {
     );
     eprintln!("  vault key   {key_line}");
     eprintln!("  audit       {}", audit_path.display());
+    let config_path = check::resolved_config_path(&root, args.config.as_deref());
+    eprint!(
+        "{}",
+        check::startup_lines(&root, &cfg, config_path.as_deref())
+    );
     let _ = io::stderr().flush();
     proxy::serve(listener, state).await
+}
+
+fn cmd_check(args: CheckArgs) -> Result<i32> {
+    let sample = match args.sample.as_deref() {
+        Some(path) => Some(read_sample(path)?),
+        None => None,
+    };
+    let report = check::inspect(&check::Request {
+        repo: args.repo,
+        config: args.config,
+        sample,
+        reveal: args.reveal,
+        port: None,
+        openai_base: None,
+        anthropic_base: None,
+    })?;
+    if args.json {
+        print!("{}", report.to_json()?);
+    } else {
+        print!("{}", report.to_text());
+    }
+    io::stdout().flush()?;
+    if args.strict && !report.warnings.is_empty() {
+        Ok(2)
+    } else {
+        Ok(0)
+    }
+}
+
+fn read_sample(path: &str) -> Result<String> {
+    let mut raw = String::new();
+    if path == "-" {
+        if io::stdin().is_terminal() {
+            anyhow::bail!("pipe text on stdin");
+        }
+        io::stdin().read_to_string(&mut raw)?;
+    } else {
+        raw = fs::read_to_string(path).with_context(|| format!("read sample {path}"))?;
+    }
+    if raw.len() > 32 * 1024 * 1024 {
+        anyhow::bail!("sample exceeds 32MiB");
+    }
+    Ok(raw)
 }
 
 fn cmd_text(args: TextArgs, redact: bool) -> Result<()> {

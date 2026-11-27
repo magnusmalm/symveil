@@ -2,11 +2,14 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use regex::Regex;
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use symveil_detect::learned::LearnedFile;
+
+#[path = "config_lenient.rs"]
+mod lenient;
 
 fn default_listen() -> String {
     "127.0.0.1".to_string()
@@ -404,6 +407,44 @@ fn known_builtin_rules() -> Vec<&'static str> {
     names
 }
 
+/// Where a `learned.toml` would be read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LearnedOrigin {
+    pub path: PathBuf,
+    /// True when `[redact] learned` or `SYMVEIL_LEARNED` selected the path.
+    /// A default user-config path is not configured.
+    pub configured: bool,
+}
+
+/// Counts from a learned file. The strings are not returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LearnedCounts {
+    pub terms: usize,
+    pub people: usize,
+}
+
+impl LearnedCounts {
+    /// Parse `learned.toml` and return counts only.
+    ///
+    /// The error does not include the file body. Callers must not format a
+    /// raw `learned.toml` parse error: it can quote terms and secrets.
+    pub fn parse(text: &str) -> Result<Self> {
+        let file =
+            LearnedFile::parse(text).map_err(|_| anyhow!("learned file could not be parsed"))?;
+        Ok(Self {
+            terms: file.names.terms.len(),
+            people: file.names.people.len(),
+        })
+    }
+}
+
+/// A config plus keys the strict parser would reject.
+#[derive(Debug, Clone)]
+pub struct LenientConfig {
+    pub config: Config,
+    pub unknown_keys: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
@@ -440,6 +481,34 @@ impl Config {
         let cfg: Self = toml::from_str(text)?;
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// Parse a document, drop unknown keys, and list them.
+    ///
+    /// Known fields keep their values. [`Config::parse`] still rejects the
+    /// same document, which is what `proxy` uses at startup.
+    pub fn parse_lenient(text: &str) -> Result<LenientConfig> {
+        lenient::parse(text)
+    }
+
+    /// Path of the learned file this config would merge, if any source exists.
+    pub fn learned_origin(&self, root: &Path) -> Option<LearnedOrigin> {
+        if let Some(configured) = &self.redact.learned {
+            return Some(LearnedOrigin {
+                path: resolve_path(root, configured),
+                configured: true,
+            });
+        }
+        if let Some(path) = learned_env_path() {
+            return Some(LearnedOrigin {
+                path,
+                configured: true,
+            });
+        }
+        symveil_detect::learned::default_path().map(|path| LearnedOrigin {
+            path,
+            configured: false,
+        })
     }
 
     fn validate(&self) -> Result<()> {
@@ -518,13 +587,7 @@ impl Config {
     }
 
     fn learned_source(&self, root: &Path) -> Option<PathBuf> {
-        if let Some(configured) = &self.redact.learned {
-            return Some(resolve_path(root, configured));
-        }
-        if let Some(path) = learned_env_path() {
-            return Some(path);
-        }
-        symveil_detect::learned::default_path()
+        self.learned_origin(root).map(|origin| origin.path)
     }
 }
 
@@ -913,6 +976,179 @@ mod tests {
         assert!(message.contains("does not exist"), "{message}");
         assert!(message.contains("missing.toml"), "{message}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lenient_parse_keeps_known_fields_and_names_unknown_keys() {
+        let loaded = Config::parse_lenient(
+            r#"
+            [proxy]
+            port = 9
+            prot = 1
+
+            [redact]
+            high_entropy = true
+
+            [redact.pii]
+            email = true
+            emial = true
+
+            [redact.category]
+            secret = "block"
+            function = "warn"
+
+            [redact.builtin]
+            private-key = "block"
+            not-a-rule = "warn"
+
+            [[redact.secrets]]
+            name = "acme-factory-token"
+            regex = '\bacme_live_[A-Za-z0-9]{16,}\b'
+            action = "warn"
+            typo = "HiddenTermZZZ"
+
+            [redact.names]
+            terms = ["Exempla"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(loaded.config.proxy.port, 9);
+        assert!(loaded.config.redact.high_entropy);
+        assert!(loaded.config.redact.pii.email);
+        assert_eq!(
+            loaded.config.redact.secrets[0].regex,
+            r"\bacme_live_[A-Za-z0-9]{16,}\b"
+        );
+        assert_eq!(
+            loaded.config.redact.names.terms,
+            vec!["Exempla".to_string()]
+        );
+        assert!(loaded
+            .config
+            .redact
+            .builtin_actions
+            .contains_key("private-key"));
+        assert!(!loaded
+            .config
+            .redact
+            .builtin_actions
+            .contains_key("not-a-rule"));
+        assert!(!loaded
+            .config
+            .redact
+            .category_actions
+            .contains_key("function"));
+        for key in [
+            "proxy.prot",
+            "redact.pii.emial",
+            "redact.category.function",
+            "redact.builtin.not-a-rule",
+            "redact.secrets[0].typo",
+        ] {
+            assert!(
+                loaded.unknown_keys.iter().any(|found| found == key),
+                "missing {key} in {:?}",
+                loaded.unknown_keys
+            );
+        }
+        let rendered = loaded.unknown_keys.join(" ");
+        assert!(!rendered.contains("HiddenTermZZZ"), "{rendered}");
+        assert!(!rendered.contains("Exempla"), "{rendered}");
+        assert!(Config::parse("[proxy]\nprot = 1\n").is_err());
+    }
+
+    #[test]
+    fn documented_config_has_no_unknown_keys() {
+        let loaded = Config::parse_lenient(
+            r#"
+            [proxy]
+            listen = "127.0.0.1"
+            port = 8787
+            openai_base = "https://api.openai.invalid"
+            anthropic_base = "https://api.anthropic.invalid"
+            timeout_secs = 900
+            audit_log = ".symveil/audit.jsonl"
+            vault = ".symveil/vault.json"
+
+            [binary]
+            mode = "block"
+
+            [redact]
+            mode = "enforce"
+            internal_domains = ["example"]
+            high_entropy = false
+
+            [redact.category]
+            secret = "redact"
+            ip = "redact"
+            hostname = "redact"
+
+            [redact.builtin]
+            private-key = "block"
+
+            [[redact.secrets]]
+            name = "acme-factory-token"
+            regex = '\bacme_live_[A-Za-z0-9]{16,}\b'
+            action = "warn"
+
+            [redact.pii]
+            email = true
+            phone = false
+            personnummer = true
+
+            [redact.names]
+            terms = ["Exempla"]
+            people = ["Ren Testdotter"]
+
+            [index]
+            min_len = 4
+            extensions = ["c", "h"]
+            "#,
+        )
+        .unwrap();
+        assert!(loaded.unknown_keys.is_empty(), "{:?}", loaded.unknown_keys);
+        assert_eq!(loaded.config.proxy.port, 8787);
+        assert_eq!(loaded.config.proxy.listen, "127.0.0.1");
+        assert_eq!(loaded.config.binary.mode, BinaryMode::Block);
+        assert_eq!(loaded.config.redact.mode, Mode::Enforce);
+        assert!(loaded.config.redact.pii.email);
+        assert!(!loaded.config.redact.pii.phone);
+        assert!(loaded.config.redact.pii.personnummer);
+        assert_eq!(
+            loaded.config.redact.names.terms,
+            vec!["Exempla".to_string()]
+        );
+        assert_eq!(
+            loaded.config.redact.names.people,
+            vec!["Ren Testdotter".to_string()]
+        );
+        assert_eq!(loaded.config.index.min_len, 4);
+        assert_eq!(loaded.config.redact.secrets[0].name, "acme-factory-token");
+        assert_eq!(
+            loaded
+                .config
+                .redact
+                .builtin_actions
+                .get("private-key")
+                .copied(),
+            Some(Action::Block)
+        );
+        assert_eq!(
+            loaded.config.redact.internal_domains,
+            vec!["example".to_string()]
+        );
+    }
+
+    #[test]
+    fn learned_counts_hide_the_term_list() {
+        let counts =
+            LearnedCounts::parse("[names]\nterms = [\"Exempla\"]\npeople = [\"Ren Testdotter\"]\n")
+                .unwrap();
+        assert_eq!(counts.terms, 1);
+        assert_eq!(counts.people, 1);
+        let err = LearnedCounts::parse("terms = [\"HiddenTermZZZ\"\n").unwrap_err();
+        let message = format!("{err:#}");
+        assert!(!message.contains("HiddenTermZZZ"), "{message}");
     }
 
     #[test]
