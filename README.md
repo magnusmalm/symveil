@@ -73,7 +73,7 @@ Matches use the `pii` category. The audit log stores the category, the rule (`em
 cargo build --release
 ```
 
-The binary is `target/release/symveil`.
+The binary is `target/release/symveil`. The system allocator is the default. `cargo build --release --features mimalloc` links mimalloc instead. That feature stays off unless the build asks for it.
 
 Mask a secret on stdin:
 

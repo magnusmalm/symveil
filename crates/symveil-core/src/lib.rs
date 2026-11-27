@@ -8,6 +8,11 @@
 
 #![forbid(unsafe_code)]
 
+/// Opt-in allocator (`--features mimalloc`). The default build keeps the system allocator.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod binary;
 mod encoding;
 mod keystore;
