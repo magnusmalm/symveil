@@ -93,9 +93,16 @@ struct LearnArgs {
     /// The path must not be inside the scanned tree.
     #[arg(long)]
     out: Option<PathBuf>,
-    /// Print a masked candidate summary and do not prompt or write.
+    /// Print a short summary and write the full masked report. Does not prompt.
     #[arg(long)]
     report: bool,
+    /// Print the full report on stdout. Needs `--report`.
+    #[arg(long = "full", alias = "report-full")]
+    full: bool,
+    /// Where to write the full report. Default: `learn-report.txt` next to `--out`,
+    /// or `~/.config/symveil/learn-report.txt`. Must not be inside the scanned tree.
+    #[arg(long)]
+    report_file: Option<PathBuf>,
     /// Print full secret values. Off by default.
     #[arg(long)]
     reveal: bool,
@@ -142,6 +149,10 @@ fn main() {
                 Err(anyhow::anyhow!(
                     "--quiet and --progress cannot be used together"
                 ))
+            } else if args.full && !args.report {
+                Err(anyhow::anyhow!(
+                    "--full prints the learn report and needs --report"
+                ))
             } else {
                 symveil_learn::run(learn_options(args))
             }
@@ -172,6 +183,8 @@ fn learn_options(args: LearnArgs) -> LearnOptions {
         root: args.path,
         out: args.out,
         report: args.report,
+        report_full: args.full,
+        report_file: args.report_file,
         reveal: args.reveal,
         max_bytes: args.max_bytes,
         gitignore: !args.no_gitignore,
