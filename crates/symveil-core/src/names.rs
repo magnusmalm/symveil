@@ -48,30 +48,20 @@ fn check_pattern(pattern: &UserPattern) -> Result<()> {
     Ok(())
 }
 
-struct Term {
-    letters: Vec<char>,
-}
-
 struct Person {
     tokens: Vec<Vec<char>>,
 }
 
 pub struct NameMasker {
-    terms: Vec<Term>,
-    people: Vec<Person>,
+    terms: Trie,
+    people: PersonTrie,
     patterns: Vec<(String, Regex)>,
 }
 
 impl NameMasker {
     pub fn compile(names: &NamesSection) -> Result<Self> {
         validate(names)?;
-        let terms = names
-            .terms
-            .iter()
-            .map(|term| Term {
-                letters: term_letters(term),
-            })
-            .collect();
+        let letters: Vec<Vec<char>> = names.terms.iter().map(|term| term_letters(term)).collect();
         let people = names
             .people
             .iter()
@@ -86,8 +76,8 @@ impl NameMasker {
             patterns.push((pattern.name.clone(), Regex::new(&pattern.regex)?));
         }
         Ok(Self {
-            terms,
-            people,
+            terms: Trie::from_terms(&letters),
+            people: PersonTrie::build(people),
             patterns,
         })
     }
@@ -101,24 +91,10 @@ impl Masker for NameMasker {
     fn collect(&self, text: &str) -> Vec<Candidate> {
         let mut out = Vec::new();
         let chars: Vec<(usize, char)> = text.char_indices().collect();
-        for term in &self.terms {
-            let mut index = 0;
-            while index < chars.len() {
-                if !start_boundary(&chars, index) {
-                    index += 1;
-                    continue;
-                }
-                let Some(end) = match_term(text, &chars, index, &term.letters) else {
-                    index += 1;
-                    continue;
-                };
-                let start = chars[index].0;
-                out.push(candidate(start, end, "name-term"));
-                while index < chars.len() && chars[index].0 < end {
-                    index += 1;
-                }
-            }
-        }
+        // Term candidates, then people, then patterns. `select_spans` is a
+        // stable sort, so this order keeps an equal-length tie on the same
+        // bytes as the earlier per-term scan.
+        self.collect_terms(text, &chars, &mut out);
         self.collect_people(&chars, &mut out);
         for (name, regex) in &self.patterns {
             for matched in regex.find_iter(text) {
@@ -133,42 +109,245 @@ impl Masker for NameMasker {
 }
 
 impl NameMasker {
-    fn collect_people(&self, chars: &[(usize, char)], out: &mut Vec<Candidate>) {
-        for person in &self.people {
-            let mut index = 0;
-            while index < chars.len() {
-                if !start_boundary(chars, index) {
-                    index += 1;
-                    continue;
+    fn collect_terms(&self, text: &str, chars: &[(usize, char)], out: &mut Vec<Candidate>) {
+        if !self.terms.has_terminal {
+            return;
+        }
+        for index in 0..chars.len() {
+            if !start_boundary(chars, index) {
+                continue;
+            }
+            let start_byte = chars[index].0;
+            let mut node = 0u32;
+            let mut pos = index;
+            let mut depth = 0usize;
+            loop {
+                let mut next = pos;
+                if depth > 0 && next < chars.len() && is_separator(chars[next].1) {
+                    next += 1;
                 }
-                let end = match_sequence(chars, index, &person.tokens)
-                    .or_else(|| match_last_comma_first(chars, index, &person.tokens));
-                let Some(end) = end else {
-                    index += 1;
-                    continue;
+                if next >= chars.len() {
+                    break;
+                }
+                let Some(letter) = fold_letter(chars[next].1) else {
+                    break;
                 };
-                out.push(candidate(chars[index].0, end, "person-name"));
-                while index < chars.len() && chars[index].0 < end {
-                    index += 1;
+                let Some(child) = self.terms.child(node, letter) else {
+                    break;
+                };
+                node = child;
+                depth += 1;
+                let after = char_end(chars, next);
+                pos = next + 1;
+                if self.terms.nodes[node as usize].terminal {
+                    let end = trailing_separator(text, after + suffix_bytes(&text[after..]));
+                    if end_boundary(text, end) {
+                        out.push(candidate(start_byte, end, "name-term"));
+                    }
                 }
             }
+        }
+    }
+
+    fn collect_people(&self, chars: &[(usize, char)], out: &mut Vec<Candidate>) {
+        if !self.people.trie.has_terminal {
+            return;
+        }
+        for index in 0..chars.len() {
+            if !start_boundary(chars, index) {
+                continue;
+            }
+            let Some((node, next_pos)) = self.people.whole_token(chars, index) else {
+                continue;
+            };
+            let start_byte = chars[index].0;
+            let token_end = char_end(chars, next_pos - 1);
+            out.push(candidate(start_byte, token_end, "person-name"));
+            for &person in &self.people.first_of[node as usize] {
+                let tokens = &self.people.tokens[person as usize];
+                if let Some(end) = match_sequence(chars, index, tokens) {
+                    out.push(candidate(start_byte, end, "person-name"));
+                }
+            }
+            for &person in &self.people.last_of[node as usize] {
+                let tokens = &self.people.tokens[person as usize];
+                if let Some(end) = match_last_comma_first(chars, index, tokens) {
+                    out.push(candidate(start_byte, end, "person-name"));
+                }
+            }
+        }
+    }
+}
+
+/// One lowercase letter. A character whose lowercase form is more than one
+/// scalar matches no stored letter, which is the same rule as `same_letter`.
+fn fold_letter(ch: char) -> Option<char> {
+    let mut lower = ch.to_lowercase();
+    let letter = lower.next()?;
+    if lower.next().is_some() {
+        None
+    } else {
+        Some(letter)
+    }
+}
+
+struct TrieNode {
+    head_char: char,
+    head_child: u32,
+    has_head: bool,
+    terminal: bool,
+    rest: Box<[(char, u32)]>,
+}
+
+impl TrieNode {
+    fn empty() -> Self {
+        Self {
+            head_char: '\0',
+            head_child: 0,
+            has_head: false,
+            terminal: false,
+            rest: Box::from([]),
+        }
+    }
+}
+
+/// Terms share one walk. A chain of unique letters keeps its first edge on the
+/// node so a 100k-term set does not allocate a vector per letter.
+struct Trie {
+    nodes: Vec<TrieNode>,
+    has_terminal: bool,
+}
+
+impl Trie {
+    fn new() -> Self {
+        Self {
+            nodes: vec![TrieNode::empty()],
+            has_terminal: false,
+        }
+    }
+
+    fn from_terms(terms: &[Vec<char>]) -> Self {
+        let mut trie = Self::new();
+        for letters in terms {
+            if letters.is_empty() {
+                continue;
+            }
+            trie.insert_terminal(letters);
+        }
+        trie
+    }
+
+    fn insert_terminal(&mut self, letters: &[char]) -> u32 {
+        let mut node = 0u32;
+        for &letter in letters {
+            node = self.ensure_edge(node, letter);
+        }
+        self.nodes[node as usize].terminal = true;
+        self.has_terminal = true;
+        node
+    }
+
+    fn ensure_edge(&mut self, node: u32, letter: char) -> u32 {
+        if let Some(child) = self.child(node, letter) {
+            return child;
+        }
+        let child = self.nodes.len() as u32;
+        self.nodes.push(TrieNode::empty());
+        self.attach(node, letter, child);
+        child
+    }
+
+    fn attach(&mut self, node: u32, letter: char, child: u32) {
+        let current = &mut self.nodes[node as usize];
+        if !current.has_head {
+            current.has_head = true;
+            current.head_char = letter;
+            current.head_child = child;
+            return;
+        }
+        let mut edges = Vec::with_capacity(current.rest.len() + 1);
+        edges.extend(current.rest.iter().copied());
+        let index = edges.partition_point(|edge| edge.0 < letter);
+        edges.insert(index, (letter, child));
+        current.rest = edges.into_boxed_slice();
+    }
+
+    fn child(&self, node: u32, letter: char) -> Option<u32> {
+        let current = &self.nodes[node as usize];
+        if current.has_head && current.head_char == letter {
+            return Some(current.head_child);
+        }
+        current
+            .rest
+            .binary_search_by_key(&letter, |edge| edge.0)
+            .ok()
+            .map(|index| current.rest[index].1)
+    }
+}
+
+struct PersonTrie {
+    trie: Trie,
+    tokens: Vec<Vec<Vec<char>>>,
+    first_of: Vec<Box<[u32]>>,
+    last_of: Vec<Box<[u32]>>,
+}
+
+impl PersonTrie {
+    fn build(people: Vec<Person>) -> Self {
+        let mut trie = Trie::new();
+        let mut first_hits = Vec::new();
+        let mut last_hits = Vec::new();
+        for (id, person) in people.iter().enumerate() {
             for token in &person.tokens {
-                let mut index = 0;
-                while index < chars.len() {
-                    if !start_boundary(chars, index) {
-                        index += 1;
-                        continue;
-                    }
-                    let Some(end) = match_token(chars, index, token) else {
-                        index += 1;
-                        continue;
-                    };
-                    out.push(candidate(chars[index].0, end, "person-name"));
-                    while index < chars.len() && chars[index].0 < end {
-                        index += 1;
-                    }
-                }
+                trie.insert_terminal(token);
             }
+            if person.tokens.len() > 1 {
+                let id = id as u32;
+                let first = trie.insert_terminal(&person.tokens[0]);
+                let last = trie.insert_terminal(person.tokens.last().expect("len > 1"));
+                first_hits.push((first, id));
+                last_hits.push((last, id));
+            }
+        }
+        let mut first_buckets = vec![Vec::new(); trie.nodes.len()];
+        let mut last_buckets = vec![Vec::new(); trie.nodes.len()];
+        for (node, id) in first_hits {
+            first_buckets[node as usize].push(id);
+        }
+        for (node, id) in last_hits {
+            last_buckets[node as usize].push(id);
+        }
+        Self {
+            trie,
+            tokens: people.into_iter().map(|person| person.tokens).collect(),
+            first_of: first_buckets
+                .into_iter()
+                .map(|ids| ids.into_boxed_slice())
+                .collect(),
+            last_of: last_buckets
+                .into_iter()
+                .map(|ids| ids.into_boxed_slice())
+                .collect(),
+        }
+    }
+
+    /// The alphanumeric run starting at `start`, when that whole run is a
+    /// configured token. A shorter token inside a longer word is not a match.
+    fn whole_token(&self, chars: &[(usize, char)], start: usize) -> Option<(u32, usize)> {
+        if start >= chars.len() || !chars[start].1.is_alphanumeric() {
+            return None;
+        }
+        let mut node = 0u32;
+        let mut pos = start;
+        while pos < chars.len() && chars[pos].1.is_alphanumeric() {
+            let letter = fold_letter(chars[pos].1)?;
+            node = self.trie.child(node, letter)?;
+            pos += 1;
+        }
+        if self.trie.nodes[node as usize].terminal {
+            Some((node, pos))
+        } else {
+            None
         }
     }
 }
@@ -218,6 +397,7 @@ fn is_separator(ch: char) -> bool {
     matches!(ch, '-' | '_' | '.')
 }
 
+#[cfg(test)]
 fn match_term(
     text: &str,
     chars: &[(usize, char)],
@@ -570,5 +750,193 @@ mod tests {
             panic!("a two-character person token was accepted");
         };
         assert!(error.to_string().contains("Al Smith"), "{error}");
+    }
+
+    #[test]
+    fn trie_spans_match_the_per_term_scan() {
+        let samples = [
+            (
+                terms(),
+                "EXEMPLA exempla_ Exem-pla Exemplas tundrahornen tundrahorn_fan_init TDH_FAN_MAX TDH-4471",
+            ),
+            (
+                people(),
+                "Ren Testdotter, REN   TESTDOTTER, Testdotter, Ren, Hello Ren. Ren-Testdotter render",
+            ),
+            (
+                NamesSection {
+                    terms: vec!["abc".into(), "abcd".into(), "abcde".into(), "xyz".into()],
+                    people: vec!["Abc Defg".into(), "Xyz Abcd".into()],
+                    patterns: vec![UserPattern {
+                        name: "zz-code".into(),
+                        regex: r"ZZ-\d+".into(),
+                        category: None,
+                    }],
+                },
+                "abc ab-cd abcden abcde Abc Defg Defg, Abc xyz ZZ-9 abcs abc_def a-b-c-d",
+            ),
+        ];
+        for (names, text) in samples {
+            assert_same_spans(&names, text);
+        }
+
+        let mut state = 0x5eed_u64;
+        let mut mixed = terms();
+        mixed.people = people().people;
+        for _ in 0..40 {
+            let mut text = String::new();
+            for _ in 0..240 {
+                let roll = xorshift(&mut state);
+                let piece: &str = match roll % 17 {
+                    0 => "Exempla",
+                    1 => "exem-pla",
+                    2 => "Tundrahornen",
+                    3 => "Ren Testdotter",
+                    4 => "Testdotter, Ren",
+                    5 => " ",
+                    6 => "-",
+                    7 => "_",
+                    8 => ".",
+                    9 => "TDH",
+                    10 => "render",
+                    11 => "s",
+                    12 => "en",
+                    13 => "ZZ",
+                    14 => "9",
+                    15 => "abc",
+                    _ => "word",
+                };
+                text.push_str(piece);
+            }
+            assert_same_spans(&mixed, &text);
+        }
+
+        let corpus = crate::bench_corpus::Corpus::build(crate::bench_corpus::Profile::ci());
+        for payload in &corpus.payloads {
+            let text = std::str::from_utf8(&payload.bytes).expect("bench payload is utf-8");
+            assert_same_spans(&corpus.redact.names, text);
+        }
+    }
+
+    fn assert_same_spans(names: &NamesSection, text: &str) {
+        let legacy = legacy_collect(names, text);
+        let masker = NameMasker::compile(names).expect("names");
+        let got: Vec<(usize, usize, String)> = masker
+            .collect(text)
+            .into_iter()
+            .map(|item| (item.start, item.end, item.rule.expect("rule")))
+            .collect();
+        let mut legacy_set = legacy.clone();
+        legacy_set.sort();
+        legacy_set.dedup();
+        let mut got_set = got.clone();
+        got_set.sort();
+        got_set.dedup();
+        for span in &legacy_set {
+            assert!(got_set.contains(span), "missing {span:?}\ntext: {text}");
+        }
+        assert_eq!(
+            greedy(&got),
+            greedy(&legacy),
+            "selected spans differ\ntext: {text}"
+        );
+    }
+
+    fn greedy(spans: &[(usize, usize, String)]) -> Vec<(usize, usize, String)> {
+        let mut ordered = spans.to_vec();
+        ordered.sort_by(|left, right| left.0.cmp(&right.0).then(right.1.cmp(&left.1)));
+        let mut selected = Vec::new();
+        let mut cursor = 0usize;
+        for span in ordered {
+            if span.0 < cursor {
+                continue;
+            }
+            cursor = span.1;
+            selected.push(span);
+        }
+        selected
+    }
+
+    fn legacy_collect(names: &NamesSection, text: &str) -> Vec<(usize, usize, String)> {
+        let terms: Vec<Vec<char>> = names.terms.iter().map(|term| term_letters(term)).collect();
+        let people: Vec<Vec<Vec<char>>> = names
+            .people
+            .iter()
+            .map(|person| person_tokens(person).expect("person"))
+            .collect();
+        let mut out = Vec::new();
+        let chars: Vec<(usize, char)> = text.char_indices().collect();
+        for letters in &terms {
+            let mut index = 0;
+            while index < chars.len() {
+                if !start_boundary(&chars, index) {
+                    index += 1;
+                    continue;
+                }
+                let Some(end) = match_term(text, &chars, index, letters) else {
+                    index += 1;
+                    continue;
+                };
+                out.push((chars[index].0, end, "name-term".to_string()));
+                while index < chars.len() && chars[index].0 < end {
+                    index += 1;
+                }
+            }
+        }
+        for person in &people {
+            let mut index = 0;
+            while index < chars.len() {
+                if !start_boundary(&chars, index) {
+                    index += 1;
+                    continue;
+                }
+                let end = match_sequence(&chars, index, person)
+                    .or_else(|| match_last_comma_first(&chars, index, person));
+                let Some(end) = end else {
+                    index += 1;
+                    continue;
+                };
+                out.push((chars[index].0, end, "person-name".to_string()));
+                while index < chars.len() && chars[index].0 < end {
+                    index += 1;
+                }
+            }
+            for token in person {
+                let mut index = 0;
+                while index < chars.len() {
+                    if !start_boundary(&chars, index) {
+                        index += 1;
+                        continue;
+                    }
+                    let Some(end) = match_token(&chars, index, token) else {
+                        index += 1;
+                        continue;
+                    };
+                    out.push((chars[index].0, end, "person-name".to_string()));
+                    while index < chars.len() && chars[index].0 < end {
+                        index += 1;
+                    }
+                }
+            }
+        }
+        for pattern in &names.patterns {
+            let regex = regex::Regex::new(&pattern.regex).expect("pattern");
+            for matched in regex.find_iter(text) {
+                if matched.start() == matched.end() {
+                    continue;
+                }
+                out.push((matched.start(), matched.end(), pattern.name.clone()));
+            }
+        }
+        out
+    }
+
+    fn xorshift(state: &mut u64) -> u64 {
+        let mut value = *state;
+        value ^= value << 13;
+        value ^= value >> 7;
+        value ^= value << 17;
+        *state = value;
+        value
     }
 }
