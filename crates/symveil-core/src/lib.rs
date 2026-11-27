@@ -15,6 +15,10 @@ mod perms;
 mod seal;
 
 pub mod audit;
+/// Synthetic workloads for the bench harness and the byte-stability test.
+/// Not part of the proxy.
+#[doc(hidden)]
+pub mod bench_corpus;
 pub mod category;
 pub mod config;
 pub mod masker;
