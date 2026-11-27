@@ -8,7 +8,6 @@ license = "Apache-2.0"
 
 [dependencies]
 aes-gcm = "0.10"
-aho-corasick = "1.1"
 anyhow = "1"
 async-stream = "0.3"
 axum = "0.7"

@@ -2340,7 +2340,6 @@ name = "symveil-core"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
- "aho-corasick",
  "anyhow",
  "async-stream",
  "axum",
