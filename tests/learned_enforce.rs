@@ -287,3 +287,145 @@ fn scale_learned_file_loads_and_saves_quickly() {
         "learned.toml load plus engine startup took {load_elapsed:?}"
     );
 }
+
+/// 100k name terms plus the same ~111k literal rules as the 204k-decision file.
+/// Decision count is higher than 200k because the literals and the terms are
+/// both present. This test only prints timings. The 2s load gate stays on
+/// `scale_learned_file_loads_and_saves_quickly`.
+/// Run with `cargo test --release --test learned_enforce -- --ignored --nocapture`.
+#[test]
+#[ignore = "release scale benchmark"]
+fn scale_100k_terms_with_literal_rules() {
+    const SECRETS: usize = 25_085;
+    const SYMBOLS: usize = 36_237;
+    const HOSTS: usize = 46_040;
+    const DOMAINS: usize = 2_000;
+    const EMAILS: usize = 1_000;
+    const IPS: usize = 1_015;
+    const TERMS: usize = 100_000;
+    const PEOPLE: usize = 2_000;
+    const SKIPS: usize = 80_664;
+    const KEEPS: usize = 778;
+
+    let mut decisions = Vec::with_capacity(300_000);
+    for index in 0..SECRETS {
+        decisions.push(decision(
+            DecisionAction::Redact,
+            LearnCategory::Secret,
+            format!("sec{index}token"),
+        ));
+    }
+    for index in 0..SYMBOLS {
+        decisions.push(decision(
+            DecisionAction::Redact,
+            LearnCategory::Symbol,
+            format!("sym{index}ident"),
+        ));
+    }
+    for index in 0..HOSTS {
+        decisions.push(decision(
+            DecisionAction::Redact,
+            LearnCategory::Host,
+            format!("h{index}.example"),
+        ));
+    }
+    for index in 0..DOMAINS {
+        decisions.push(decision(
+            DecisionAction::Redact,
+            LearnCategory::Domain,
+            format!("d{index}.example"),
+        ));
+    }
+    for index in 0..EMAILS {
+        decisions.push(decision(
+            DecisionAction::Redact,
+            LearnCategory::Email,
+            format!("u{index}@box.example"),
+        ));
+    }
+    for index in 0..IPS {
+        decisions.push(decision(
+            DecisionAction::Redact,
+            LearnCategory::Ip,
+            format!("192.0.2.{index}"),
+        ));
+    }
+    for index in 0..TERMS {
+        decisions.push(decision(
+            DecisionAction::Redact,
+            LearnCategory::Name,
+            format!("tn{index:06}zq"),
+        ));
+    }
+    for index in 0..PEOPLE {
+        decisions.push(decision(
+            DecisionAction::Redact,
+            LearnCategory::Person,
+            format!("p{:02} q{:02}", index % 100, index / 100),
+        ));
+    }
+    for index in 0..SKIPS {
+        decisions.push(decision(
+            DecisionAction::Skip,
+            LearnCategory::Symbol,
+            format!("skip{index}word"),
+        ));
+    }
+    for index in 0..KEEPS {
+        decisions.push(decision(
+            DecisionAction::Keep,
+            LearnCategory::Symbol,
+            format!("keep{index}word"),
+        ));
+    }
+
+    let save_started = Instant::now();
+    let file = file_from_decisions(&decisions).unwrap();
+    let text = file.to_toml().unwrap();
+    let save_elapsed = save_started.elapsed();
+    let counts = LearnedCounts::from_file(&file);
+    assert_eq!(counts.terms, TERMS);
+    assert_eq!(counts.people, PEOPLE);
+    assert_eq!(counts.secrets, SECRETS);
+    assert_eq!(counts.symbols, SYMBOLS);
+
+    let load_started = Instant::now();
+    let mut cfg = Config::default();
+    cfg.apply_learned_toml(&text).unwrap();
+    let mut engine = Engine::new(Vault::ephemeral(), &cfg.redact).unwrap();
+    let load_elapsed = load_started.elapsed();
+
+    let sample = "see sec10token and h10.example and tn000010zq and tn000010-zq and tn000010zqs and sym10ident and p00 q00 and plain text";
+    let redact_started = Instant::now();
+    let out = masked(&mut engine, sample);
+    let redact_elapsed = redact_started.elapsed();
+    assert!(!out.contains("sec10token"), "{out}");
+    assert!(!out.contains("h10.example"), "{out}");
+    assert!(!out.contains("tn000010zq"), "{out}");
+    assert!(!out.contains("tn000010-zq"), "{out}");
+    assert!(!out.contains("tn000010zqs"), "{out}");
+    assert!(!out.contains("sym10ident"), "{out}");
+    assert!(!out.contains("p00"), "{out}");
+    assert!(out.contains("plain text"), "{out}");
+
+    let body = "alpha beta gamma delta ".repeat(200);
+    let body_started = Instant::now();
+    let missed = masked(&mut engine, &body);
+    let body_elapsed = body_started.elapsed();
+    assert_eq!(missed, body);
+
+    let wide = "alpha beta gamma delta epsilon ".repeat(4_000);
+    let wide_started = Instant::now();
+    let wide_out = masked(&mut engine, &wide);
+    let wide_elapsed = wide_started.elapsed();
+    assert_eq!(wide_out, wide);
+
+    eprintln!(
+        "scale100k decisions={} toml_bytes={} literals={} save={save_elapsed:?} load={load_elapsed:?} redact_hit={redact_elapsed:?} redact_miss={body_elapsed:?} body_bytes={} wide={wide_elapsed:?} wide_bytes={}",
+        decisions.len(),
+        text.len(),
+        SECRETS + SYMBOLS + HOSTS + DOMAINS + EMAILS + IPS,
+        body.len(),
+        wide.len()
+    );
+}
