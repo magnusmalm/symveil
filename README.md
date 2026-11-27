@@ -299,7 +299,11 @@ An unknown `mode` fails at startup and names `block`, `pass`, and `scan`.
 
 The command does not call a model and does not open a network connection. It does not read `[proxy]` (`openai_base`, `anthropic_base`, `listen`) and it does not use those values. If the process environment has an LLM base URL or an HTTP proxy (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `GROK_XAI_API_BASE_URL`, `GROK_MODELS_BASE_URL`, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `SOCKS_PROXY`, and the `SYMVEIL_*` endpoint variables listed in the error), the command exits before it scans. Unset them for that process. It still will not connect if they are set; it refuses so a shell that is pointed at an upstream is not the process that builds the list.
 
-The scan is read-only. It does not create or edit files in the tree. Symlinks are not followed. `--follow-symlinks` still will not open a link that resolves outside the root. `.git`, build directories, binaries, and files over `--max-bytes` (default 1 MiB) are skipped. `.gitignore` is applied unless you pass `--no-gitignore`.
+The scan is read-only. It does not create or edit files in the tree. Symlinks are not followed. `--follow-symlinks` still will not open a link that resolves outside the root. `.git` is always skipped. The same pass skips `target/`, `node_modules/`, `build/`, `dist/`, `vendor/`, `.venv/`, `venv/`, `__pycache__/`, and the other build-directory names in that list, whether or not the tree is a git checkout. Binaries and files over `--max-bytes` (default 1 MiB) are skipped. The report names the directories and extensions it skipped. `--include-skipped` reads those directories and the text inside the skipped extensions. It does not open `.git`. `.gitignore` is applied unless you pass `--no-gitignore`, and a tree with no `.gitignore` simply has nothing for that rule to match.
+
+`--exclude <glob>` is repeatable. A pattern with no `/` matches a file or directory name in any directory. A pattern with `/` is relative to the scan root (`bsp/**` skips that layer and does not descend into it). `--include-skipped` does not undo `--exclude`.
+
+While the files are scanned, progress goes to stderr: files done and the candidate total, bytes, elapsed time, an ETA when one can be estimated, and the current path with the tail kept when it is long. A terminal redraws that line in place, at most five times a second. A pipe gets a plain line every few seconds, plus a line at the start and at the end. The line is counts and paths, never file contents. `--quiet` turns the ticker off. `--progress` turns it on. The two flags together are an error. A file that takes more than about two seconds is named on stderr with its path, size, and time, and the report ends with the slowest of those files.
 
 It asks for company, product, project, and people names first. Those are stored as redact decisions and also used to surface identifiers that contain them. A triage screen then lists counts: secrets, matches of the names you typed, hosts/emails/ips, names, and other identifiers. Each prompt has a one-line legend: `[r]edact  [k]eep  [s]kip  [a]ll-in-group  [?]help  [q]uit+save`. `?` explains what each choice writes into `learned.toml`. A group is decided together; `[d]rill` opens one candidate. `[v]` shows low-signal candidates that are hidden by default (seen once, or a code word). Secrets, emails, IPs, and hosts stay listed. The header is `Secrets 3/12 · overall 15/248 decided · 33 hidden low-signal`. Quit prints what will be written, then saves. A later run hides candidates you already decided. Skip does not count as a decision.
 
@@ -316,6 +320,8 @@ This is a mechanical pass over tokens, string literals, the builtin secret detec
 ```bash
 symveil learn /path/to/tree
 symveil learn /path/to/tree --report
+symveil learn /path/to/tree --quiet --report
+symveil learn /path/to/tree --exclude 'bsp/**' --exclude '*.patch' --report
 symveil learn /path/to/tree --out "$HOME/.config/symveil/learned.toml"
 ```
 

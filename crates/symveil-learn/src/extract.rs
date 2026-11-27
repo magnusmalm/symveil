@@ -3,6 +3,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
+#[cfg(test)]
+use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
 use symveil_detect::secrets::{high_entropy_hits, scan_secrets};
 
@@ -66,11 +68,41 @@ struct Acc {
     comment_hits: u64,
 }
 
-pub fn extract(files: &[WalkedFile]) -> Vec<Candidate> {
+#[cfg(test)]
+pub(crate) fn extract(files: &[WalkedFile]) -> Vec<Candidate> {
+    let parts: Vec<Vec<RawHit>> = files
+        .par_iter()
+        .map(|file| extract_file(&file.text))
+        .collect();
+    assemble(files, parts)
+}
+
+#[cfg(test)]
+pub(crate) fn extract_sequential(files: &[WalkedFile]) -> Vec<Candidate> {
+    let parts: Vec<Vec<RawHit>> = files.iter().map(|file| extract_file(&file.text)).collect();
+    assemble(files, parts)
+}
+
+pub(crate) struct Prepared {
+    hits: Vec<RawHit>,
+}
+
+pub(crate) fn prepare(text: &str) -> Prepared {
+    Prepared {
+        hits: extract_file(text),
+    }
+}
+
+pub(crate) fn candidates_from(files: &[WalkedFile], parts: Vec<Prepared>) -> Vec<Candidate> {
+    assemble(files, parts.into_iter().map(|part| part.hits).collect())
+}
+
+fn assemble(files: &[WalkedFile], parts: Vec<Vec<RawHit>>) -> Vec<Candidate> {
     let mut acc: HashMap<String, Acc> = HashMap::new();
-    for file in files {
-        for hit in extract_file(&file.text) {
-            merge(&mut acc, file, hit);
+    for (file, hits) in files.iter().zip(parts) {
+        let lines = LineMap::build(&file.text);
+        for hit in hits {
+            merge(&mut acc, file, hit, &lines);
         }
     }
     add_product_prefix_hits(files, &mut acc);
@@ -112,11 +144,13 @@ fn add_product_prefix_hits(files: &[WalkedFile], acc: &mut HashMap<String, Acc>)
         }
     }
     for file in files {
+        let mut lines = None;
         for prefix in &long_prefixes {
             let marker = format!("{prefix}_");
             let Some(pos) = file.text.find(&marker) else {
                 continue;
             };
+            let lines = lines.get_or_insert_with(|| LineMap::build(&file.text));
             merge(
                 acc,
                 file,
@@ -128,6 +162,7 @@ fn add_product_prefix_hits(files: &[WalkedFile], acc: &mut HashMap<String, Acc>)
                     rule: Some("product-prefix".to_string()),
                     in_comment: false,
                 },
+                lines,
             );
         }
     }
@@ -139,7 +174,7 @@ fn promote_full_identifiers(
     acc: &mut HashMap<String, Acc>,
     short_prefixes: &[String],
 ) {
-    let names: Vec<String> = acc
+    let names: HashSet<String> = acc
         .values()
         .filter(|item| {
             item.category == LearnCategory::Name
@@ -151,8 +186,9 @@ fn promote_full_identifiers(
         })
         .map(|item| item.text.to_lowercase())
         .collect();
+    let short: HashSet<&str> = short_prefixes.iter().map(String::as_str).collect();
     let mut assignments = HashSet::new();
-    let mut hits = Vec::new();
+    let mut found = HashSet::new();
     for file in files {
         for matched in IDENT.find_iter(&file.text) {
             let ident = matched.as_str();
@@ -162,26 +198,18 @@ fn promote_full_identifiers(
             if is_assignment(&file.text, matched.end()) {
                 assignments.insert(ident.to_string());
             }
-            if full_form(ident, short_prefixes, &names) && !hits.iter().any(|seen| seen == ident) {
-                hits.push(ident.to_string());
+            if full_form(ident, &short, &names) {
+                found.insert(ident.to_string());
             }
         }
     }
-    let found = hits;
-    let promoted: Vec<String> = found
-        .iter()
-        .filter(|ident| {
-            !assignments.contains(*ident)
-                && !found.iter().any(|other| {
-                    other.len() > ident.len()
-                        && other.starts_with(ident.as_str())
-                        && other.as_bytes().get(ident.len()) == Some(&b'_')
-                })
-        })
-        .cloned()
-        .collect();
-    for ident in promoted {
-        let key = key_for(LearnCategory::Symbol, &ident);
+    let mut sorted: Vec<String> = found.into_iter().collect();
+    sorted.sort();
+    for ident in &sorted {
+        if assignments.contains(ident) || has_longer_extension(&sorted, ident) {
+            continue;
+        }
+        let key = key_for(LearnCategory::Symbol, ident);
         if let Some(entry) = acc.get_mut(&key) {
             if entry.category == LearnCategory::Symbol && entry.rule.is_none() {
                 entry.rule = Some("macro".to_string());
@@ -190,15 +218,42 @@ fn promote_full_identifiers(
     }
 }
 
-fn full_form(ident: &str, short_prefixes: &[String], names: &[String]) -> bool {
-    let tokens: Vec<&str> = ident.split('_').filter(|token| !token.is_empty()).collect();
-    if tokens.len() < 2 {
-        return false;
+fn has_longer_extension(sorted: &[String], ident: &str) -> bool {
+    let mut prefix = String::with_capacity(ident.len() + 1);
+    prefix.push_str(ident);
+    prefix.push('_');
+    let index = sorted.partition_point(|other| other.as_str() < prefix.as_str());
+    sorted
+        .get(index)
+        .is_some_and(|other| other.starts_with(&prefix))
+}
+
+fn full_form(ident: &str, short_prefixes: &HashSet<&str>, names: &HashSet<String>) -> bool {
+    let mut count = 0;
+    let mut matched = false;
+    for token in ident.split('_') {
+        if token.is_empty() {
+            continue;
+        }
+        count += 1;
+        if short_prefixes.contains(token) || name_has(names, token) {
+            matched = true;
+        }
     }
-    tokens.iter().any(|token| {
-        short_prefixes.iter().any(|prefix| prefix == token)
-            || names.iter().any(|name| name == &token.to_lowercase())
-    })
+    count >= 2 && matched
+}
+
+fn name_has(names: &HashSet<String>, token: &str) -> bool {
+    const MAX: usize = 64;
+    if token.len() <= MAX && token.is_ascii() {
+        let mut buf = [0u8; MAX];
+        for (index, byte) in token.bytes().enumerate() {
+            buf[index] = byte.to_ascii_lowercase();
+        }
+        let lower = std::str::from_utf8(&buf[..token.len()]).unwrap_or("");
+        return names.contains(lower);
+    }
+    names.contains(&token.to_lowercase())
 }
 
 fn is_assignment(text: &str, end: usize) -> bool {
@@ -239,6 +294,7 @@ pub fn surface_terms(files: &[WalkedFile], terms: &[String], candidates: &mut Ve
     }
     let mut acc: HashMap<String, Acc> = HashMap::new();
     for file in files {
+        let lines = LineMap::build(&file.text);
         let lower = file.text.to_lowercase();
         for term in terms {
             if term.chars().count() < 3 {
@@ -267,6 +323,7 @@ pub fn surface_terms(files: &[WalkedFile], terms: &[String], candidates: &mut Ve
                                 rule: None,
                                 in_comment: false,
                             },
+                            &lines,
                         );
                     }
                 }
@@ -333,13 +390,13 @@ fn finish(key: String, item: Acc) -> Option<Candidate> {
     })
 }
 
-fn merge(acc: &mut HashMap<String, Acc>, file: &WalkedFile, hit: RawHit) {
+fn merge(acc: &mut HashMap<String, Acc>, file: &WalkedFile, hit: RawHit, lines: &LineMap) {
     if hit.text.is_empty() || hit.start >= hit.end {
         return;
     }
     let key = key_for(hit.category, &hit.text);
-    let line = line_of(&file.text, hit.start);
-    let context = source_line(&file.text, hit.start, hit.end);
+    let line = lines.line_no(hit.start);
+    let context = source_line(&file.text, lines, hit.start, hit.end);
     let (left_glued, right_glued) = glued(&file.text, hit.start, hit.end);
     let entry = acc.entry(key).or_insert_with(|| Acc {
         text: hit.text.clone(),
@@ -412,6 +469,7 @@ fn sort_candidates(candidates: &mut [Candidate]) {
 }
 
 fn extract_file(text: &str) -> Vec<RawHit> {
+    let lines = LineMap::build(text);
     let (comments, strings) = lex(text);
     let mut hits = Vec::new();
     let mut blocked: Vec<(usize, usize)> = Vec::new();
@@ -428,7 +486,7 @@ fn extract_file(text: &str) -> Vec<RawHit> {
         });
     }
     for hit in high_entropy_hits(text) {
-        if overlaps(&blocked, hit.start, hit.end) {
+        if overlaps_linear(&blocked, hit.start, hit.end) {
             continue;
         }
         let value = text_slice(text, hit.start, hit.end);
@@ -442,15 +500,17 @@ fn extract_file(text: &str) -> Vec<RawHit> {
             in_comment: in_ranges(&comments, hit.start, hit.end),
         });
     }
+    merge_spans(&mut blocked);
     push_emails(text, &comments, &blocked, &mut hits);
     push_ips(text, &comments, &blocked, &mut hits);
     push_hosts(text, &comments, &blocked, &mut hits);
     push_product_codes(text, &comments, &mut blocked, &mut hits);
     push_flag_secrets(text, &comments, &mut blocked, &mut hits);
-    push_people(text, &comments, &blocked, &mut hits);
-    push_identifiers(text, &comments, &blocked, &mut hits);
-    push_strings(text, &strings, &comments, &blocked, &mut hits);
-    push_capitalised(text, &comments, &blocked, &mut hits);
+    merge_spans(&mut blocked);
+    push_people(text, &lines, &comments, &blocked, &mut hits);
+    push_identifiers(text, &lines, &comments, &blocked, &mut hits);
+    push_strings(text, &lines, &strings, &comments, &blocked, &mut hits);
+    push_capitalised(text, &lines, &comments, &blocked, &mut hits);
     dedup_hits(hits)
 }
 
@@ -710,7 +770,7 @@ fn push_product_codes(
     hits: &mut Vec<RawHit>,
 ) {
     for matched in PRODUCT_CODE.find_iter(text) {
-        if overlaps(blocked, matched.start(), matched.end()) {
+        if overlaps_linear(blocked, matched.start(), matched.end()) {
             continue;
         }
         blocked.push((matched.start(), matched.end()));
@@ -738,7 +798,7 @@ fn push_flag_secrets(
         if !value.as_str().chars().any(|ch| ch.is_ascii_digit()) {
             continue;
         }
-        if overlaps(blocked, value.start(), value.end()) {
+        if overlaps_linear(blocked, value.start(), value.end()) {
             continue;
         }
         blocked.push((value.start(), value.end()));
@@ -755,6 +815,7 @@ fn push_flag_secrets(
 
 fn push_people(
     text: &str,
+    lines: &LineMap,
     comments: &[(usize, usize)],
     blocked: &[(usize, usize)],
     hits: &mut Vec<RawHit>,
@@ -763,7 +824,7 @@ fn push_people(
         let Some(whole) = caps.get(0) else {
             continue;
         };
-        if overlaps(blocked, whole.start(), whole.end()) || pem_line(text, whole.start()) {
+        if overlaps(blocked, whole.start(), whole.end()) || lines.is_pem(whole.start()) {
             continue;
         }
         let Some(first) = caps.get(1) else {
@@ -784,7 +845,7 @@ fn push_people(
         if first.as_str().chars().count() < 3 || last.as_str().chars().count() < 3 {
             continue;
         }
-        if date_context(text, whole.start()) {
+        if date_context(text, lines, whole.start()) {
             continue;
         }
         hits.push(raw(
@@ -798,33 +859,85 @@ fn push_people(
     }
 }
 
-fn date_context(text: &str, start: usize) -> bool {
-    let (line_start, line_end) = line_bounds(text, start);
-    let line = text[line_start..line_end].trim_start().to_ascii_lowercase();
-    line.starts_with("date:") || line.starts_with("datum:")
+fn date_context(text: &str, lines: &LineMap, start: usize) -> bool {
+    let (line_start, line_end) = lines.bounds(start);
+    let line = text[line_start..line_end].trim_start();
+    let mut buf = [0u8; 6];
+    let mut count = 0;
+    for byte in line.bytes().take(6) {
+        buf[count] = byte.to_ascii_lowercase();
+        count += 1;
+    }
+    let head = &buf[..count];
+    head.starts_with(b"date:") || head.starts_with(b"datum:")
 }
 
-fn pem_line(text: &str, start: usize) -> bool {
-    let (line_start, line_end) = line_bounds(text, start);
-    let line = &text[line_start..line_end];
+struct LineMap {
+    /// Byte index of each `\n`.
+    breaks: Vec<usize>,
+    len: usize,
+    pem: Vec<bool>,
+}
+
+impl LineMap {
+    fn build(text: &str) -> Self {
+        let breaks: Vec<usize> = text
+            .bytes()
+            .enumerate()
+            .filter(|(_, byte)| *byte == b'\n')
+            .map(|(index, _)| index)
+            .collect();
+        let mut pem = Vec::with_capacity(breaks.len() + 1);
+        let mut start = 0;
+        for &newline in &breaks {
+            pem.push(pem_marker(&text[start..newline]));
+            start = newline + 1;
+        }
+        pem.push(pem_marker(&text[start..]));
+        Self {
+            breaks,
+            len: text.len(),
+            pem,
+        }
+    }
+
+    fn line_no(&self, start: usize) -> u32 {
+        self.line_index(start) as u32 + 1
+    }
+
+    fn bounds(&self, start: usize) -> (usize, usize) {
+        let start = start.min(self.len);
+        let index = self.line_index(start);
+        let line_start = if index == 0 {
+            0
+        } else {
+            self.breaks[index - 1] + 1
+        };
+        let line_end = if index < self.breaks.len() {
+            self.breaks[index]
+        } else {
+            self.len
+        };
+        (line_start, line_end)
+    }
+
+    fn is_pem(&self, start: usize) -> bool {
+        let index = self.line_index(start.min(self.len));
+        self.pem.get(index).copied().unwrap_or(false)
+    }
+
+    fn line_index(&self, start: usize) -> usize {
+        self.breaks.partition_point(|newline| *newline < start)
+    }
+}
+
+fn pem_marker(line: &str) -> bool {
     line.contains("PRIVATE KEY") || line.contains("OPENSSH") || line.contains("-----BEGIN")
-}
-
-fn line_bounds(text: &str, start: usize) -> (usize, usize) {
-    let start = start.min(text.len());
-    let line_start = text[..start]
-        .rfind('\n')
-        .map(|index| index + 1)
-        .unwrap_or(0);
-    let line_end = text[start..]
-        .find('\n')
-        .map(|index| start + index)
-        .unwrap_or(text.len());
-    (line_start, line_end)
 }
 
 fn push_identifiers(
     text: &str,
+    lines: &LineMap,
     comments: &[(usize, usize)],
     blocked: &[(usize, usize)],
     hits: &mut Vec<RawHit>,
@@ -840,7 +953,7 @@ fn push_identifiers(
         {
             continue;
         }
-        if pem_line(text, matched.start()) {
+        if lines.is_pem(matched.start()) {
             continue;
         }
         let in_comment = in_ranges(comments, matched.start(), matched.end());
@@ -893,6 +1006,7 @@ fn push_identifiers(
 
 fn push_strings(
     text: &str,
+    lines: &LineMap,
     strings: &[(usize, usize)],
     comments: &[(usize, usize)],
     blocked: &[(usize, usize)],
@@ -906,7 +1020,7 @@ fn push_strings(
         if value.chars().count() < 3 || value.chars().count() > 80 || value.contains('\n') {
             continue;
         }
-        if value.contains("://") || is_stopped(value) || pem_line(text, start) {
+        if value.contains("://") || is_stopped(value) || lines.is_pem(start) {
             continue;
         }
         if opaque_token(value) {
@@ -947,6 +1061,7 @@ fn push_strings(
 
 fn push_capitalised(
     text: &str,
+    lines: &LineMap,
     comments: &[(usize, usize)],
     blocked: &[(usize, usize)],
     hits: &mut Vec<RawHit>,
@@ -959,7 +1074,7 @@ fn push_capitalised(
         if is_stopped(word) || is_calendar(word) || word.chars().count() < 4 {
             continue;
         }
-        if date_context(text, matched.start()) {
+        if date_context(text, lines, matched.start()) {
             continue;
         }
         hits.push(raw(
@@ -1095,16 +1210,40 @@ fn split_camel(piece: &str) -> Vec<String> {
     parts
 }
 
-fn overlaps(spans: &[(usize, usize)], start: usize, end: usize) -> bool {
+fn overlaps_linear(spans: &[(usize, usize)], start: usize, end: usize) -> bool {
     spans
         .iter()
         .any(|&(left, right)| start < right && left < end)
 }
 
+fn merge_spans(spans: &mut Vec<(usize, usize)>) {
+    if spans.len() < 2 {
+        return;
+    }
+    spans.sort_unstable();
+    let mut merged = Vec::with_capacity(spans.len());
+    let mut current = spans[0];
+    for &(left, right) in spans.iter().skip(1) {
+        if left <= current.1 {
+            current.1 = current.1.max(right);
+        } else {
+            merged.push(current);
+            current = (left, right);
+        }
+    }
+    merged.push(current);
+    *spans = merged;
+}
+
+/// `spans` is sorted and disjoint.
+fn overlaps(spans: &[(usize, usize)], start: usize, end: usize) -> bool {
+    let index = spans.partition_point(|&(left, _)| left < end);
+    index > 0 && start < spans[index - 1].1
+}
+
 fn in_ranges(ranges: &[(usize, usize)], start: usize, end: usize) -> bool {
-    ranges
-        .iter()
-        .any(|&(left, right)| start >= left && end <= right)
+    let index = ranges.partition_point(|&(left, _)| left <= start);
+    index > 0 && start >= ranges[index - 1].0 && end <= ranges[index - 1].1
 }
 
 fn text_slice(text: &str, start: usize, end: usize) -> &str {
@@ -1119,7 +1258,7 @@ fn text_slice(text: &str, start: usize, end: usize) -> &str {
     }
 }
 
-fn source_line(text: &str, start: usize, end: usize) -> String {
+fn source_line(text: &str, lines: &LineMap, start: usize, end: usize) -> String {
     if text.is_empty() || start > text.len() {
         return String::new();
     }
@@ -1132,16 +1271,9 @@ fn source_line(text: &str, start: usize, end: usize) -> String {
         return text[start..end].to_string();
     }
     let start = floor_boundary(text, start);
-    let line_start = text[..start]
-        .rfind('\n')
-        .map(|index| index + 1)
-        .unwrap_or(0);
-    let line_end = text[start..]
-        .find('\n')
-        .map(|index| start + index)
-        .unwrap_or(text.len());
+    let (line_start, line_end) = lines.bounds(start);
     let line = &text[line_start..line_end];
-    if line.chars().count() <= 240 {
+    if line.len() <= 240 || (line.len() <= 960 && line.chars().take(241).count() <= 240) {
         return line.to_string();
     }
     let value = text.get(start..end.min(text.len())).unwrap_or("");
@@ -1173,100 +1305,92 @@ fn ceil_boundary(text: &str, mut index: usize) -> usize {
     index
 }
 
-fn line_of(text: &str, start: usize) -> u32 {
-    text[..start.min(text.len())]
-        .bytes()
-        .filter(|byte| *byte == b'\n')
-        .count() as u32
-        + 1
-}
-
 type Span = (usize, usize);
 
 fn lex(text: &str) -> (Vec<Span>, Vec<Span>) {
-    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let bytes = text.as_bytes();
     let mut index = 0;
     let mut comments = Vec::new();
     let mut strings = Vec::new();
-    while index < chars.len() {
-        let ch = chars[index].1;
-        let next = chars.get(index + 1).map(|item| item.1);
-        if ch == '/' && next == Some('/') {
-            let start = chars
-                .get(index + 2)
-                .map(|item| item.0)
-                .unwrap_or(text.len());
-            index += 2;
-            while index < chars.len() && chars[index].1 != '\n' {
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            let start = index + 2;
+            index = start;
+            while index < bytes.len() && bytes[index] != b'\n' {
                 index += 1;
             }
-            let end = chars.get(index).map(|item| item.0).unwrap_or(text.len());
-            if end > start {
-                comments.push((start, end));
+            if index > start {
+                comments.push((start, index));
             }
             continue;
         }
-        if ch == '/' && next == Some('*') {
-            let start = chars
-                .get(index + 2)
-                .map(|item| item.0)
-                .unwrap_or(text.len());
-            index += 2;
-            while index + 1 < chars.len() && !(chars[index].1 == '*' && chars[index + 1].1 == '/') {
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            let start = index + 2;
+            index = start;
+            while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
                 index += 1;
             }
-            let end = chars.get(index).map(|item| item.0).unwrap_or(text.len());
-            if end > start {
-                comments.push((start, end));
+            if index > start {
+                comments.push((start, index));
             }
-            if index + 1 < chars.len() {
+            if index + 1 < bytes.len() {
                 index += 2;
             }
             continue;
         }
-        if ch == '#' {
-            let start = chars
-                .get(index + 1)
-                .map(|item| item.0)
-                .unwrap_or(text.len());
-            index += 1;
-            while index < chars.len() && chars[index].1 != '\n' {
+        if byte == b'#' {
+            let start = index + 1;
+            index = start;
+            while index < bytes.len() && bytes[index] != b'\n' {
                 index += 1;
             }
-            let end = chars.get(index).map(|item| item.0).unwrap_or(text.len());
-            if end > start {
-                comments.push((start, end));
+            if index > start {
+                comments.push((start, index));
             }
             continue;
         }
-        if ch == '"' || ch == '\'' || ch == '`' {
-            let quote = ch;
+        if byte == b'"' || byte == b'\'' || byte == b'`' {
+            let quote = byte;
             index += 1;
-            let Some(start_item) = chars.get(index) else {
-                break;
-            };
-            let start = start_item.0;
-            while index < chars.len() && chars[index].1 != quote {
-                if chars[index].1 == '\\' && index + 1 < chars.len() {
-                    index += 2;
+            let start = index;
+            while index < bytes.len() && bytes[index] != quote {
+                if bytes[index] == b'\\' && index + 1 < bytes.len() {
+                    index += 1 + utf8_width(bytes[index + 1]);
                     continue;
                 }
-                if chars[index].1 == '\n' && quote != '`' {
+                if bytes[index] == b'\n' && quote != b'`' {
                     break;
                 }
                 index += 1;
             }
-            let end = chars.get(index).map(|item| item.0).unwrap_or(text.len());
-            if index < chars.len() && chars[index].1 == quote && end >= start {
+            let end = index;
+            if index < bytes.len() && bytes[index] == quote && end >= start {
                 strings.push((start, end));
                 index += 1;
             }
             continue;
         }
-        index += 1;
+        index += utf8_width(byte);
     }
     (comments, strings)
 }
+
+fn utf8_width(byte: u8) -> usize {
+    if byte < 0x80 {
+        1
+    } else if byte < 0xE0 {
+        2
+    } else if byte < 0xF0 {
+        3
+    } else {
+        4
+    }
+}
+
+#[cfg(test)]
+#[path = "profile_extract.rs"]
+mod profile_extract;
 
 #[cfg(test)]
 mod tests {
@@ -1540,5 +1664,37 @@ fn return_value() {}
             has(&found, LearnCategory::Host, "git.tdh.corp"),
             "{found:?}"
         );
+    }
+
+    #[test]
+    fn parallel_extract_matches_sequential_order() {
+        let files = vec![
+            WalkedFile {
+                relative: "src/a.rs".to_string(),
+                text: "/* Ren Testdotter */\n#define TDH_FAN_MAX 1\ncode TDH-4471\n".to_string(),
+            },
+            WalkedFile {
+                relative: "src/b.rs".to_string(),
+                text: "fn tundrahorn_fan_init() {}\nconst KEY: &str = \"AKIAIOSFODNN7EXAMPLE\";\n"
+                    .to_string(),
+            },
+        ];
+        let parallel = extract(&files);
+        let sequential = extract_sequential(&files);
+        assert_eq!(parallel.len(), sequential.len());
+        for (left, right) in parallel.iter().zip(sequential.iter()) {
+            assert_eq!(left.key, right.key);
+            assert_eq!(left.text, right.text);
+            assert_eq!(left.category, right.category);
+            assert_eq!(left.rule, right.rule);
+            assert_eq!(left.occurrences, right.occurrences);
+            assert_eq!(left.files, right.files);
+            assert_eq!(left.first_file, right.first_file);
+            assert_eq!(left.first_line, right.first_line);
+            assert_eq!(left.context, right.context);
+            assert_eq!(left.sources, right.sources);
+            assert_eq!(left.left_glued, right.left_glued);
+            assert_eq!(left.right_glued, right.right_glued);
+        }
     }
 }
