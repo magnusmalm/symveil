@@ -273,6 +273,48 @@ fn clean_config_is_quiet_and_hides_terms() {
 }
 
 #[test]
+fn buffered_audit_check_names_the_crash_tradeoff() {
+    let tmp = Temp::new("audit-buffer");
+    let repo = tmp.repo();
+    let port = free_port();
+    let mut body = clean_body(port);
+    write_config(&repo, &body);
+    let off = run(
+        &tmp.home(),
+        &["check", "--json", "--repo", repo.to_str().unwrap()],
+    );
+    assert!(off.status.success(), "{}\n{}", off.stderr, off.stdout);
+    assert!(!off.stdout.contains("a crash can lose"));
+    let off_json: Value = serde_json::from_str(&off.stdout).unwrap();
+    assert_eq!(off_json["audit_buffered"], false);
+    assert_eq!(off_json["proxy"]["audit_buffered"], false);
+
+    body = body.replace(
+        "audit_log = \".symveil/audit.jsonl\"\n",
+        "audit_log = \".symveil/audit.jsonl\"\naudit_buffered = true\n",
+    );
+    write_config(&repo, &body);
+    let on = run(&tmp.home(), &["check", "--repo", repo.to_str().unwrap()]);
+    assert!(on.status.success(), "{}\n{}", on.stderr, on.stdout);
+    assert!(on.stdout.contains("audit_flush"), "{}", on.stdout);
+    assert!(
+        on.stdout
+            .contains("buffered; a crash can lose the last lines still in the buffer"),
+        "{}",
+        on.stdout
+    );
+    assert_both_hidden(&on);
+    let json = run(
+        &tmp.home(),
+        &["check", "--json", "--repo", repo.to_str().unwrap()],
+    );
+    assert!(json.status.success(), "{}\n{}", json.stderr, json.stdout);
+    let value: Value = serde_json::from_str(&json.stdout).unwrap();
+    assert_eq!(value["audit_buffered"], true);
+    assert_eq!(value["proxy"]["audit_buffered"], true);
+}
+
+#[test]
 fn human_report_lists_the_effective_settings() {
     let tmp = Temp::new("human");
     let repo = tmp.repo();

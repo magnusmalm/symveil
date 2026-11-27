@@ -10,7 +10,7 @@ use aho_corasick::{AhoCorasick, MatchKind};
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
-use regex::{Captures, Regex};
+use regex::{Captures, Regex, RegexSet};
 
 use crate::literals::{boundaries_ok, literal_pattern};
 
@@ -202,6 +202,9 @@ struct LiteralRule {
 
 pub struct SecretSet {
     rules: Vec<CompiledRule>,
+    /// Same order as `rules`. A pattern that misses here is not scanned again.
+    /// `None` means the set did not compile, and every rule is scanned.
+    prefilter: Option<RegexSet>,
     /// Escaped literals with optional `\b` edges. One automaton, not one regex each.
     literals: Option<AhoCorasick>,
     literal_rules: Vec<LiteralRule>,
@@ -210,6 +213,7 @@ pub struct SecretSet {
 impl SecretSet {
     pub fn compile(user: &[UserRule]) -> Result<Self> {
         let mut rules = Vec::with_capacity(BUILTINS.len());
+        let mut patterns = Vec::with_capacity(BUILTINS.len());
         for builtin in BUILTINS {
             let regex = Regex::new(builtin.pattern)
                 .with_context(|| format!("builtin secret rule {}", builtin.name))?;
@@ -219,6 +223,7 @@ impl SecretSet {
                 groups: builtin.groups.to_vec(),
                 filter_low_signal: builtin.filter_low_signal,
             });
+            patterns.push(builtin.pattern.to_string());
         }
         let mut literal_text = Vec::new();
         let mut literal_rules = Vec::new();
@@ -250,6 +255,7 @@ impl SecretSet {
                 groups: Vec::new(),
                 filter_low_signal: false,
             });
+            patterns.push(pattern.regex.clone());
         }
         let literals = if literal_text.is_empty() {
             None
@@ -261,16 +267,32 @@ impl SecretSet {
                     .context("compile learned literal rules")?,
             )
         };
+        let prefilter = RegexSet::new(&patterns).ok();
         Ok(Self {
             rules,
+            prefilter,
             literals,
             literal_rules,
         })
     }
 
     pub fn find(&self, text: &str) -> Vec<SecretHit> {
+        self.collect(text, true)
+    }
+
+    fn collect(&self, text: &str, use_prefilter: bool) -> Vec<SecretHit> {
         let mut hits = Vec::new();
-        for rule in &self.rules {
+        let matched = if use_prefilter {
+            self.prefilter.as_ref().map(|set| set.matches(text))
+        } else {
+            None
+        };
+        for (index, rule) in self.rules.iter().enumerate() {
+            if let Some(which) = &matched {
+                if !which.matched(index) {
+                    continue;
+                }
+            }
             for caps in rule.regex.captures_iter(text) {
                 let Some((start, end, value)) = secret_span(&caps, &rule.groups) else {
                     continue;
@@ -315,6 +337,11 @@ impl SecretSet {
             }
         }
         hits
+    }
+
+    #[cfg(test)]
+    fn find_without_prefilter(&self, text: &str) -> Vec<SecretHit> {
+        self.collect(text, false)
     }
 }
 
@@ -710,5 +737,44 @@ mod tests {
         assert_eq!(spans("wrapped"), vec![(0, 3), (9, 12)]);
         assert_eq!(spans("glued"), vec![(13, 16)]);
         assert_eq!(spans("code"), vec![(22, 30)]);
+    }
+
+    #[test]
+    fn prefilter_keeps_the_same_spans_as_scanning_every_rule() {
+        let rules = vec![
+            UserRule {
+                name: "bench-token".into(),
+                regex: r"svcn_[a-z0-9]{16}".into(),
+            },
+            UserRule {
+                name: "bench-rule-0007".into(),
+                regex: r"benchrule0007_[a-z]{8}".into(),
+            },
+        ];
+        let set = SecretSet::compile(&rules).unwrap();
+        assert!(set.prefilter.is_some());
+        let samples = [
+            "",
+            "lumen quartz pebble orbit nimbus",
+            "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
+            "custom svcn_notarealtoken001 code SVCODE-0042",
+            "token benchrule0007_abcdefgh tail",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
+            "https://user:S3cretPass@db.box.example/app",
+            "foo xfoo foo bar barx TDH-4471",
+        ];
+        for text in samples {
+            let filtered: Vec<_> = set
+                .find(text)
+                .into_iter()
+                .map(|hit| (hit.start, hit.end, hit.rule))
+                .collect();
+            let full: Vec<_> = set
+                .find_without_prefilter(text)
+                .into_iter()
+                .map(|hit| (hit.start, hit.end, hit.rule))
+                .collect();
+            assert_eq!(filtered, full, "{text}");
+        }
     }
 }
