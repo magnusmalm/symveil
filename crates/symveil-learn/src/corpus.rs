@@ -1,8 +1,8 @@
 //! Scores a realistic triage of the synthetic leak corpus.
 //!
-//! The text set is the 64 `expect = masked` items that appear in a text file.
+//! The text set is the 65 `expect = masked` items that appear in a text file.
 //! The planted set is those masked items plus `agent-pass`, `docker-opaque`,
-//! and `pytest-opaque` (73). Phone numbers, Swedish personnummer, and IPv6
+//! and `pytest-opaque` (74). Phone numbers, Swedish personnummer, and IPv6
 //! stay in both denominators: this pass does not learn them.
 //!
 //! A full hit consumes the whole planted value. A partial hit masks a proper
@@ -26,9 +26,9 @@ use crate::walk::{self, WalkOptions};
 use symveil_detect::learned::LearnedFile;
 
 /// Masked items with a text-file location.
-const TEXT_SET: usize = 64;
+const TEXT_SET: usize = 65;
 /// Masked items, plus the three whole secrets the harness leaves visible.
-const PLANTED_SET: usize = 73;
+const PLANTED_SET: usize = 74;
 
 // Measured triage on this corpus. A partial that becomes full still passes.
 // 54/58 useful is 93%. Keep hits and benign hits are precision failures.

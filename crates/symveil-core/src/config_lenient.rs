@@ -101,6 +101,8 @@ fn redact_schema() -> Schema {
         ("secrets", Schema::Array(Box::new(secret_schema()))),
         ("high_entropy", Schema::Any),
         ("dotenv", Schema::Any),
+        ("home_paths", Schema::Any),
+        ("username", Schema::Any),
         ("pii", pii_schema()),
         ("names", names_schema()),
         ("learned", Schema::Any),
