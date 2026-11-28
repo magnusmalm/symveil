@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -53,6 +54,9 @@ pub struct Request {
     pub port: Option<u16>,
     pub openai_base: Option<String>,
     pub anthropic_base: Option<String>,
+    /// When set, the report includes per-phase durations and the learned file
+    /// size. The line is counts and times only.
+    pub timings: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +143,7 @@ pub struct Report {
     home_paths: bool,
     pub warnings: Vec<Warning>,
     sample: Option<SampleReport>,
+    timings: Option<Timings>,
 }
 
 impl Report {
@@ -183,6 +188,9 @@ impl Report {
         push_warnings(&mut out, &self.warnings);
         if let Some(sample) = &self.sample {
             push_sample(&mut out, sample);
+        }
+        if let Some(timings) = &self.timings {
+            push_line(&mut out, "timings", &timings.line());
         }
         out
     }
@@ -258,7 +266,135 @@ impl Report {
         if let Some(sample) = &self.sample {
             body["sample"] = sample_json(sample);
         }
+        if let Some(timings) = &self.timings {
+            body["timings"] = timings.json();
+        }
         body
+    }
+}
+
+/// Durations from one `check`. Bytes and milliseconds only: no paths and no
+/// file text. `warnings_ms` includes the git exposure checks. `build` is
+/// `debug` or `release`, which changes how long the same file takes.
+struct Timings {
+    build: &'static str,
+    total: Duration,
+    config_read: Duration,
+    config_parse: Duration,
+    learned_read: Duration,
+    learned_parse: Duration,
+    learned_merge: Duration,
+    files: Duration,
+    port: Duration,
+    warnings: Duration,
+    sample: Duration,
+    other: Duration,
+    learned_bytes: u64,
+}
+
+impl Timings {
+    fn line(&self) -> String {
+        format!(
+            "build={} total_ms={} config_read_ms={} config_parse_ms={} learned_read_ms={} learned_parse_ms={} learned_merge_ms={} files_ms={} port_ms={} warnings_ms={} sample_ms={} other_ms={} learned_bytes={}",
+            self.build,
+            ms(self.total),
+            ms(self.config_read),
+            ms(self.config_parse),
+            ms(self.learned_read),
+            ms(self.learned_parse),
+            ms(self.learned_merge),
+            ms(self.files),
+            ms(self.port),
+            ms(self.warnings),
+            ms(self.sample),
+            ms(self.other),
+            self.learned_bytes,
+        )
+    }
+
+    fn json(&self) -> Value {
+        serde_json::json!({
+            "build": self.build,
+            "total_ms": ms(self.total),
+            "config_read_ms": ms(self.config_read),
+            "config_parse_ms": ms(self.config_parse),
+            "learned_read_ms": ms(self.learned_read),
+            "learned_parse_ms": ms(self.learned_parse),
+            "learned_merge_ms": ms(self.learned_merge),
+            "files_ms": ms(self.files),
+            "port_ms": ms(self.port),
+            "warnings_ms": ms(self.warnings),
+            "sample_ms": ms(self.sample),
+            "other_ms": ms(self.other),
+            "learned_bytes": self.learned_bytes,
+        })
+    }
+}
+
+fn ms(duration: Duration) -> f64 {
+    let millis = duration.as_secs_f64() * 1_000.0;
+    (millis * 10.0).round() / 10.0
+}
+
+struct Phases {
+    config_read: Duration,
+    config_parse: Duration,
+    learned_read: Duration,
+    learned_parse: Duration,
+    learned_merge: Duration,
+    files: Duration,
+    port: Duration,
+    warnings: Duration,
+    sample: Duration,
+    learned_bytes: u64,
+}
+
+impl Phases {
+    fn new() -> Self {
+        Self {
+            config_read: Duration::ZERO,
+            config_parse: Duration::ZERO,
+            learned_read: Duration::ZERO,
+            learned_parse: Duration::ZERO,
+            learned_merge: Duration::ZERO,
+            files: Duration::ZERO,
+            port: Duration::ZERO,
+            warnings: Duration::ZERO,
+            sample: Duration::ZERO,
+            learned_bytes: 0,
+        }
+    }
+
+    fn finish(&self, total: Duration) -> Timings {
+        let accounted = self
+            .config_read
+            .saturating_add(self.config_parse)
+            .saturating_add(self.learned_read)
+            .saturating_add(self.learned_parse)
+            .saturating_add(self.learned_merge)
+            .saturating_add(self.files)
+            .saturating_add(self.port)
+            .saturating_add(self.warnings)
+            .saturating_add(self.sample);
+        Timings {
+            build: if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            },
+            total,
+            config_read: self.config_read,
+            config_parse: self.config_parse,
+            learned_read: self.learned_read,
+            learned_parse: self.learned_parse,
+            learned_merge: self.learned_merge,
+            files: self.files,
+            port: self.port,
+            warnings: self.warnings,
+            sample: self.sample,
+            other: total.saturating_sub(accounted),
+            learned_bytes: self.learned_bytes,
+        }
     }
 }
 
@@ -287,7 +423,7 @@ pub fn startup_lines(root: &Path, cfg: &Config, config_path: Option<&Path>) -> S
             problem: None,
         }
     } else {
-        read_learned(origin, None)
+        read_learned(origin, None, None)
     };
     let vault_mode = mode_of_file(&resolve_path(root, &cfg.proxy.vault));
     let warnings = collect_warnings(Facts {
@@ -326,16 +462,24 @@ pub fn startup_lines(root: &Path, cfg: &Config, config_path: Option<&Path>) -> S
 /// Build the check report. Does not create the vault, the audit log, or a listener
 /// that stays open. A writable probe file is created and removed.
 pub fn inspect(request: &Request) -> Result<Report> {
+    let started = Instant::now();
+    let mut phases = Phases::new();
     let root = canonicalize_repo(&request.repo)?;
-    let (mut cfg, config_path, unknown_keys) = load_config(&root, request.config.as_deref())?;
+    let (mut cfg, config_path, unknown_keys) =
+        load_config(&root, request.config.as_deref(), &mut phases)?;
     let origin = cfg.learned_origin(&root);
-    let learned = read_learned(origin, Some(&mut cfg));
+    let learned = read_learned(origin, Some(&mut cfg), Some(&mut phases));
     apply_overrides(&mut cfg, request);
     let vault_path = resolve_path(&root, &cfg.proxy.vault);
     let audit_path = resolve_path(&root, &cfg.proxy.audit_log);
+    let files_started = Instant::now();
     let vault = file_state(&vault_path);
     let audit_log = file_state(&audit_path);
+    phases.files = files_started.elapsed();
+    let port_started = Instant::now();
     let (port_free, listen_warning) = port_status(&cfg.proxy.listen, cfg.proxy.port);
+    phases.port = port_started.elapsed();
+    let warnings_started = Instant::now();
     let mut warnings = collect_warnings(Facts {
         root: &root,
         cfg: &cfg,
@@ -352,10 +496,14 @@ pub fn inspect(request: &Request) -> Result<Report> {
             .cmp(&right.code)
             .then(left.message.cmp(&right.message))
     });
+    phases.warnings = warnings_started.elapsed();
+    let sample_started = Instant::now();
     let sample = match &request.sample {
         Some(text) => Some(redact_sample(&cfg, text, request.reveal)?),
         None => None,
     };
+    phases.sample = sample_started.elapsed();
+    let timings = request.timings.then(|| phases.finish(started.elapsed()));
     Ok(Report {
         config_found: config_path.is_some(),
         config_path: config_path.as_deref().map(display_path),
@@ -387,6 +535,7 @@ pub fn inspect(request: &Request) -> Result<Report> {
         home_paths: cfg.redact.home_paths,
         warnings,
         sample,
+        timings,
     })
 }
 
@@ -403,14 +552,19 @@ fn canonicalize_repo(repo: &Path) -> Result<PathBuf> {
 fn load_config(
     root: &Path,
     explicit: Option<&Path>,
+    phases: &mut Phases,
 ) -> Result<(Config, Option<PathBuf>, Vec<String>)> {
     let Some(path) = explicit.map(Path::to_path_buf).or_else(|| discover(root)) else {
         return Ok((Config::default(), None, Vec::new()));
     };
+    let read_started = Instant::now();
     let text =
         fs::read_to_string(&path).with_context(|| format!("read config {}", path.display()))?;
+    phases.config_read = read_started.elapsed();
+    let parse_started = Instant::now();
     let loaded =
         Config::parse_lenient(&text).with_context(|| format!("parse config {}", path.display()))?;
+    phases.config_parse = parse_started.elapsed();
     let display = fs::canonicalize(&path).unwrap_or(path);
     Ok((loaded.config, Some(display), loaded.unknown_keys))
 }
@@ -427,7 +581,11 @@ fn apply_overrides(cfg: &mut Config, request: &Request) {
     }
 }
 
-fn read_learned(origin: Option<LearnedOrigin>, merge_into: Option<&mut Config>) -> LearnedView {
+fn read_learned(
+    origin: Option<LearnedOrigin>,
+    merge_into: Option<&mut Config>,
+    mut phases: Option<&mut Phases>,
+) -> LearnedView {
     let Some(origin) = origin else {
         return LearnedView::empty();
     };
@@ -448,9 +606,13 @@ fn read_learned(origin: Option<LearnedOrigin>, merge_into: Option<&mut Config>) 
         );
     }
     let mode = unix_mode(&origin.path);
+    let read_started = Instant::now();
     let text = match fs::read_to_string(&origin.path) {
         Ok(text) => text,
         Err(_) => {
+            if let Some(phases) = phases.as_mut() {
+                phases.learned_read = read_started.elapsed();
+            }
             return LearnedView::problem(
                 origin.path,
                 origin.configured,
@@ -459,19 +621,38 @@ fn read_learned(origin: Option<LearnedOrigin>, merge_into: Option<&mut Config>) 
             );
         }
     };
+    if let Some(phases) = phases.as_mut() {
+        phases.learned_read = read_started.elapsed();
+        phases.learned_bytes = text.len() as u64;
+    }
     // One parse. A failed merge leaves the caller's config unchanged.
     let loaded = if let Some(cfg) = merge_into {
         let mut trial = cfg.clone();
-        match trial.apply_learned_toml(&text) {
-            Ok(()) => {
+        let parse_started = Instant::now();
+        match trial.apply_learned_toml_timed(&text) {
+            Ok(timing) => {
+                if let Some(phases) = phases.as_mut() {
+                    phases.learned_parse = timing.parse;
+                    phases.learned_merge = timing.merge;
+                }
                 let counts = trial.learned_counts;
                 *cfg = trial;
                 Some(counts)
             }
-            Err(_) => None,
+            Err(_) => {
+                if let Some(phases) = phases.as_mut() {
+                    phases.learned_parse = parse_started.elapsed();
+                }
+                None
+            }
         }
     } else {
-        LearnedCounts::parse(&text).ok()
+        let parse_started = Instant::now();
+        let counts = LearnedCounts::parse(&text).ok();
+        if let Some(phases) = phases.as_mut() {
+            phases.learned_parse = parse_started.elapsed();
+        }
+        counts
     };
     let Some(counts) = loaded else {
         return LearnedView::problem(
@@ -1205,7 +1386,8 @@ fn learned_line(learned: &LearnedView) -> String {
 
 fn counts_text(counts: &LearnedCounts) -> String {
     format!(
-        "terms={} people={} secrets={} emails={} ips={} hosts={} domains={} symbols={} skips={} keeps={}",
+        "decisions={} terms={} people={} secrets={} emails={} ips={} hosts={} domains={} symbols={} skips={} keeps={}",
+        counts.decisions,
         counts.terms,
         counts.people,
         counts.secrets,
@@ -1225,6 +1407,7 @@ fn learned_json(report: &Report) -> Value {
         "path": report.learned_path,
         "configured": report.learned_configured,
         "loaded": report.learned_loaded,
+        "decisions": counts.decisions,
         "terms": counts.terms,
         "people": counts.people,
         "secrets": counts.secrets,
