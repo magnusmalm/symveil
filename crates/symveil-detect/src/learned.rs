@@ -99,35 +99,17 @@ pub struct DecisionRecord {
 
 impl LearnedFile {
     pub fn parse(text: &str) -> Result<Self> {
-        let file: Self = toml::from_str(text).context("parse learned.toml")?;
-        if file.version != 1 {
-            bail!(
-                "learned.toml version {} is not supported (this build reads version 1)",
-                file.version
-            );
-        }
-        for rule in file.secrets.iter().chain(file.symbols.iter()) {
-            if rule.name.is_empty() {
-                bail!("a learned rule needs a name");
+        // The writer emits one regular shape. toml's parser builds a document
+        // tree first, and that tree is most of a 200k-decision load. Anything
+        // the direct reader does not recognize is still read here.
+        let file = match crate::learned_fast::try_parse(text) {
+            Ok(file) => file,
+            Err(crate::learned_fast::Reject::Unsupported) => {
+                toml::from_str(text).context("parse learned.toml")?
             }
-            if rule.regex.is_empty() {
-                bail!("learned rule `{}` has an empty regex", rule.name);
-            }
-        }
-        for decision in &file.decisions {
-            if decision.action != "redact" && decision.action != "keep" && decision.action != "skip"
-            {
-                bail!(
-                    "learned decision `{}` has action `{}`; expected \"redact\", \"keep\", or \"skip\"",
-                    decision.key,
-                    decision.action
-                );
-            }
-            if decision.text.is_empty() {
-                bail!("learned decision `{}` has empty text", decision.key);
-            }
-        }
-        Ok(file)
+            Err(crate::learned_fast::Reject::Invalid(err)) => return Err(err),
+        };
+        check_learned(file)
     }
 
     pub fn to_toml(&self) -> Result<String> {
@@ -164,6 +146,36 @@ impl LearnedFile {
         }
         Ok(body)
     }
+}
+
+fn check_learned(file: LearnedFile) -> Result<LearnedFile> {
+    if file.version != 1 {
+        bail!(
+            "learned.toml version {} is not supported (this build reads version 1)",
+            file.version
+        );
+    }
+    for rule in file.secrets.iter().chain(file.symbols.iter()) {
+        if rule.name.is_empty() {
+            bail!("a learned rule needs a name");
+        }
+        if rule.regex.is_empty() {
+            bail!("learned rule `{}` has an empty regex", rule.name);
+        }
+    }
+    for decision in &file.decisions {
+        if decision.action != "redact" && decision.action != "keep" && decision.action != "skip" {
+            bail!(
+                "learned decision `{}` has action `{}`; expected \"redact\", \"keep\", or \"skip\"",
+                decision.key,
+                decision.action
+            );
+        }
+        if decision.text.is_empty() {
+            bail!("learned decision `{}` has empty text", decision.key);
+        }
+    }
+    Ok(file)
 }
 
 fn push_string_list(out: &mut String, key: &str, values: &[String]) {

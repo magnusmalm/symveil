@@ -427,6 +427,13 @@ fn known_builtin_rules() -> Vec<&'static str> {
     names
 }
 
+/// How long [`Config::apply_learned_toml`] spent reading and merging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LearnedLoadTiming {
+    pub parse: std::time::Duration,
+    pub merge: std::time::Duration,
+}
+
 /// Where a `learned.toml` would be read from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LearnedOrigin {
@@ -608,8 +615,24 @@ impl Config {
 
     /// Merge a `learned.toml` document into this config.
     pub fn apply_learned_toml(&mut self, text: &str) -> Result<()> {
+        self.apply_learned_toml_timed(text)?;
+        Ok(())
+    }
+
+    /// Merge a learned document and report parse time separately from the
+    /// merge. Parse is the toml read. Merge copies rules into this config and
+    /// checks ones that are not literals. Neither duration includes engine
+    /// startup.
+    pub fn apply_learned_toml_timed(&mut self, text: &str) -> Result<LearnedLoadTiming> {
+        let started = std::time::Instant::now();
         let file = LearnedFile::parse(text)?;
-        self.apply_learned_file(&file)
+        let parse = started.elapsed();
+        let started = std::time::Instant::now();
+        self.apply_learned_file(&file)?;
+        Ok(LearnedLoadTiming {
+            parse,
+            merge: started.elapsed(),
+        })
     }
 
     /// Merge an already-parsed learned file. Literals are not compiled here;

@@ -7,5 +7,6 @@
 
 pub mod dotenv;
 pub mod learned;
+mod learned_fast;
 pub mod literals;
 pub mod secrets;

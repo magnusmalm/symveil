@@ -143,6 +143,8 @@ fn three_thousand_literal_rules_load_and_match() {
 /// list. Skips are 80664 and write no rule. Keeps are 778 and are the allow
 /// list. Those buckets add up to 204267. Nothing is dropped. `symveil check`
 /// prints `decisions` and `terms` as separate numbers for that reason.
+/// Reading that document with the toml crate was about a second. The direct
+/// reader is what the parse gate below is holding onto.
 ///
 /// Run with `cargo test --release --test learned_enforce -- --ignored --nocapture`.
 #[test]
@@ -256,8 +258,10 @@ fn scale_learned_file_loads_and_saves_quickly() {
 
     let load_started = Instant::now();
     let mut cfg = Config::default();
-    cfg.apply_learned_toml(&text).unwrap();
+    let timing = cfg.apply_learned_toml_timed(&text).unwrap();
+    let engine_started = Instant::now();
     let mut engine = Engine::new(Vault::ephemeral(), &cfg.redact).unwrap();
+    let engine_elapsed = engine_started.elapsed();
     let load_elapsed = load_started.elapsed();
 
     let redact_started = Instant::now();
@@ -276,10 +280,24 @@ fn scale_learned_file_loads_and_saves_quickly() {
     let body_elapsed = body_started.elapsed();
 
     eprintln!(
-        "scale decisions={} toml_bytes={} save={save_elapsed:?} build={built:?} toml={toml_elapsed:?} load={load_elapsed:?} redact_hit={redact_elapsed:?} redact_miss={body_elapsed:?} body_bytes={}",
+        "scale decisions={} toml_bytes={} save={save_elapsed:?} build={built:?} toml={toml_elapsed:?} parse={:?} merge={:?} engine={engine_elapsed:?} load={load_elapsed:?} redact_hit={redact_elapsed:?} redact_miss={body_elapsed:?} body_bytes={}",
         decisions.len(),
         text.len(),
+        timing.parse,
+        timing.merge,
         body.len()
+    );
+    // toml::from_str on this file was about a second. The direct reader is
+    // what keeps parse well under the load gate.
+    let parse_limit = if cfg!(debug_assertions) {
+        Duration::from_secs(10)
+    } else {
+        Duration::from_millis(500)
+    };
+    assert!(
+        timing.parse < parse_limit,
+        "learned.toml parse took {:?}",
+        timing.parse
     );
     let save_limit = if cfg!(debug_assertions) {
         Duration::from_secs(30)

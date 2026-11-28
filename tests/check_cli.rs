@@ -1024,6 +1024,67 @@ fn proxy_startup_prints_a_short_summary_without_terms() {
     assert_hidden(&text);
 }
 
+#[test]
+fn check_timings_are_durations_and_bytes_only() {
+    let tmp = Temp::new("timings");
+    let repo = tmp.repo();
+    let port = free_port();
+    let learned = repo.join("learned.toml");
+    fs::write(
+        &learned,
+        "[names]\nterms = [\"Tundrahorn\"]\npeople = [\"Ren Testdotter\"]\n",
+    )
+    .unwrap();
+    set_mode(&learned, 0o600);
+    write_config(&repo, &with_learned(&clean_body(port), &learned));
+
+    let plain = run(&tmp.home(), &["check", "--repo", repo.to_str().unwrap()]);
+    assert!(
+        plain.status.success(),
+        "status {:?}\n{}\n{}",
+        plain.status,
+        plain.stderr,
+        plain.stdout
+    );
+    assert!(!plain.stdout.contains("\n  timings"), "{}", plain.stdout);
+    assert_both_hidden(&plain);
+
+    let out = run(
+        &tmp.home(),
+        &["check", "--timings", "--repo", repo.to_str().unwrap()],
+    );
+    assert!(out.status.success(), "{}\n{}", out.stderr, out.stdout);
+    let label = if cfg!(debug_assertions) {
+        "build=debug"
+    } else {
+        "build=release"
+    };
+    assert!(out.stdout.contains(label), "{}", out.stdout);
+    assert!(out.stdout.contains("learned_parse_ms="), "{}", out.stdout);
+    assert!(out.stdout.contains("learned_merge_ms="), "{}", out.stdout);
+    assert!(out.stdout.contains("warnings_ms="), "{}", out.stdout);
+    assert!(out.stdout.contains("learned_bytes="), "{}", out.stdout);
+    assert_both_hidden(&out);
+
+    let json = run(
+        &tmp.home(),
+        &[
+            "check",
+            "--timings",
+            "--json",
+            "--repo",
+            repo.to_str().unwrap(),
+        ],
+    );
+    assert!(json.status.success(), "{}", json.stdout);
+    let value: Value = serde_json::from_str(&json.stdout).unwrap();
+    assert!(value.get("timings").is_some(), "{value}");
+    assert!(value["timings"]["learned_bytes"].as_u64().unwrap() > 0);
+    assert!(value["timings"]["total_ms"].as_f64().is_some(), "{value}");
+    assert!(value["timings"].get("text").is_none());
+    assert_both_hidden(&json);
+}
+
 struct ChildGuard(Option<Child>);
 
 impl Drop for ChildGuard {

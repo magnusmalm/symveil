@@ -119,6 +119,9 @@ struct CheckArgs {
     /// With `--sample`, print matched values. Local only. Do not share the output.
     #[arg(long)]
     reveal: bool,
+    /// Print per-phase milliseconds and the learned file size. No file text.
+    #[arg(long)]
+    timings: bool,
 }
 
 #[derive(clap::Args)]
@@ -369,6 +372,7 @@ async fn cmd_proxy(args: ProxyArgs) -> Result<()> {
             port: args.port,
             openai_base: args.openai_base.clone(),
             anthropic_base: args.anthropic_base.clone(),
+            timings: false,
         })?;
         print!("{}", report.to_text());
         io::stdout().flush()?;
@@ -468,6 +472,7 @@ fn cmd_check(args: CheckArgs) -> Result<i32> {
         port: None,
         openai_base: None,
         anthropic_base: None,
+        timings: args.timings,
     })?;
     if args.json {
         print!("{}", report.to_json()?);
