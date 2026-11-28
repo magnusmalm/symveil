@@ -163,6 +163,7 @@ fn shellcheck_launch_scripts() {
             "scripts/symveil-claude",
             "scripts/symveil-grok",
             "scripts/symveil-common.sh",
+            "scripts/real-client-dotenv.sh",
         ])
         .current_dir(repo())
         .status()

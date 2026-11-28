@@ -24,6 +24,8 @@ pub mod audit;
 /// Not part of the proxy.
 #[doc(hidden)]
 pub mod bench_corpus;
+/// Loopback recorder for a manual client run. The proxy does not call it.
+pub mod capture;
 pub mod category;
 pub mod config;
 pub mod masker;
