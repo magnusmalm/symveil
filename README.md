@@ -377,7 +377,9 @@ Point the proxy at a non-default file with `learned = "learned.toml"` under `[re
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-shellcheck -s sh -x scripts/symveil-claude scripts/symveil-grok scripts/symveil-common.sh
+shellcheck -s sh -x scripts/symveil-claude scripts/symveil-grok scripts/symveil-common.sh scripts/real-client-dotenv.sh
+
+A manual Claude check of the synthetic dotenv fixture is [docs/real-client-dotenv.md](docs/real-client-dotenv.md).
 make leak-test
 make leak-streak
 ```
