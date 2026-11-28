@@ -2,12 +2,14 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use serde_json::Value;
+use symveil_detect::aws::boundary_parts;
 
 use crate::binary::{self, BinaryNote};
 use crate::category::Category;
 use crate::config::{Action, BinaryMode, Mode, RedactSection};
 use crate::masker::{Boundary, Candidate, Masker};
 use crate::names::NameMasker;
+use crate::paths::PathMasker;
 use crate::pii::PiiMasker;
 use crate::scan::NetworkMasker;
 use crate::secrets::SecretMasker;
@@ -72,6 +74,9 @@ impl Engine {
             redact.dotenv,
         )?));
         maskers.push(Box::new(NetworkMasker::compile(&redact.internal_domains)?));
+        if let Some(paths) = PathMasker::from_config(redact)? {
+            maskers.push(Box::new(paths));
+        }
         if redact.pii.enabled() {
             maskers.push(Box::new(PiiMasker::compile(&redact.pii)));
         }
@@ -203,9 +208,10 @@ impl Engine {
                 hits.extend(found);
             }
             Value::Array(items) => {
-                for item in items {
+                for item in &mut *items {
                     self.redact_value(item, hits)?;
                 }
+                self.seal_array(items, hits)?;
             }
             Value::Object(map) => {
                 self.redact_object(map, hits)?;
@@ -277,11 +283,154 @@ impl Engine {
             }
             rebuilt.push((redacted_key, child));
         }
+        self.seal_object_values(&mut rebuilt, hits)?;
         map.clear();
         for (key, child) in rebuilt {
             map.insert(key, child);
         }
         Ok(())
+    }
+
+    /// Adjacent JSON strings, and adjacent `{type:text, text}` chunks, are
+    /// scanned one at a time. A key that is split across that boundary is
+    /// still two fragments upstream until both pieces are masked.
+    fn seal_array(&mut self, items: &mut [Value], hits: &mut Vec<Hit>) -> Result<()> {
+        let mut index = 0;
+        while index + 1 < items.len() {
+            if let (Value::String(left), Value::String(right)) = (&items[index], &items[index + 1])
+            {
+                if fragment_may_split(left) || fragment_may_split(right) {
+                    let left = left.clone();
+                    let right = right.clone();
+                    let (new_left, new_right, found) = self.mask_boundary(&left, &right)?;
+                    if !found.is_empty() {
+                        items[index] = Value::String(new_left);
+                        items[index + 1] = Value::String(new_right);
+                        hits.extend(found);
+                    }
+                }
+            }
+            index += 1;
+        }
+        index = 0;
+        while index + 1 < items.len() {
+            let pair = match (chunk_text(&items[index]), chunk_text(&items[index + 1])) {
+                (Some(left), Some(right))
+                    if fragment_may_split(left) || fragment_may_split(right) =>
+                {
+                    Some((left.to_string(), right.to_string()))
+                }
+                _ => None,
+            };
+            if let Some((left, right)) = pair {
+                let (new_left, new_right, found) = self.mask_boundary(&left, &right)?;
+                if !found.is_empty() {
+                    set_chunk_text(&mut items[index], new_left);
+                    set_chunk_text(&mut items[index + 1], new_right);
+                    hits.extend(found);
+                }
+            }
+            index += 1;
+        }
+        Ok(())
+    }
+
+    fn seal_object_values(
+        &mut self,
+        rebuilt: &mut [(String, Value)],
+        hits: &mut Vec<Hit>,
+    ) -> Result<()> {
+        let mut index = 0;
+        while index + 1 < rebuilt.len() {
+            if let (Value::String(left), Value::String(right)) =
+                (&rebuilt[index].1, &rebuilt[index + 1].1)
+            {
+                if fragment_may_split(left) || fragment_may_split(right) {
+                    let left = left.clone();
+                    let right = right.clone();
+                    let (new_left, new_right, found) = self.mask_boundary(&left, &right)?;
+                    if !found.is_empty() {
+                        rebuilt[index].1 = Value::String(new_left);
+                        rebuilt[index + 1].1 = Value::String(new_right);
+                        hits.extend(found);
+                    }
+                }
+            }
+            index += 1;
+        }
+        Ok(())
+    }
+
+    fn mask_boundary(&mut self, left: &str, right: &str) -> Result<(String, String, Vec<Hit>)> {
+        let parts = boundary_parts(left, right);
+        if parts.is_empty() {
+            return Ok((left.to_string(), right.to_string(), Vec::new()));
+        }
+        let mut left_spans = Vec::new();
+        let mut right_spans = Vec::new();
+        for part in parts {
+            if part.left {
+                left_spans.push((part.start, part.end, part.rule));
+            } else {
+                right_spans.push((part.start, part.end, part.rule));
+            }
+        }
+        let (left_out, left_hits) = self.mask_spans(left, left_spans)?;
+        let (right_out, right_hits) = self.mask_spans(right, right_spans)?;
+        let mut hits = left_hits;
+        hits.extend(right_hits);
+        Ok((left_out, right_out, hits))
+    }
+
+    fn mask_spans(
+        &mut self,
+        text: &str,
+        mut spans: Vec<(usize, usize, &'static str)>,
+    ) -> Result<(String, Vec<Hit>)> {
+        if spans.is_empty() {
+            return Ok((text.to_string(), Vec::new()));
+        }
+        spans.sort_by_key(|span| span.0);
+        let mut block = false;
+        let mut redact = false;
+        for (_, _, rule) in &spans {
+            match self.resolve(Category::Secret, Some(rule)) {
+                Action::Block => block = true,
+                Action::Redact => redact = true,
+                Action::Warn => {}
+            }
+        }
+        if block || !redact {
+            let hits = spans
+                .into_iter()
+                .map(|(start, end, rule)| Hit {
+                    original: text[start..end].to_string(),
+                    placeholder: String::new(),
+                    category: Category::Secret,
+                    rule: Some(rule.to_string()),
+                    action: self.resolve(Category::Secret, Some(rule)),
+                })
+                .collect();
+            return Ok((text.to_string(), hits));
+        }
+        let mut out = text.to_string();
+        let mut hits = Vec::with_capacity(spans.len());
+        for (start, end, rule) in spans.into_iter().rev() {
+            let original = out[start..end].to_string();
+            let placeholder =
+                self.vault
+                    .assign(&original, Category::Secret, Some(rule.to_string()))?;
+            out.replace_range(start..end, &placeholder);
+            hits.push(Hit {
+                original,
+                placeholder,
+                category: Category::Secret,
+                rule: Some(rule.to_string()),
+                action: Action::Redact,
+            });
+        }
+        hits.reverse();
+        Ok((out, hits))
     }
 
     /// When the isolated value is not itself a token, rebuild `"key": "value"`
@@ -491,6 +640,28 @@ impl Engine {
 /// contains `pass` or ends in `_KEY` still takes the slow probe. A key outside
 /// this set cannot make `"key": "value"` redact `value` when `value` alone
 /// would not.
+fn fragment_may_split(text: &str) -> bool {
+    text.contains("AKIA") || text.contains('/') || text.contains('+')
+}
+
+fn chunk_text(value: &Value) -> Option<&str> {
+    let object = value.as_object()?;
+    if let Some(kind) = object.get("type").and_then(Value::as_str) {
+        if kind != "text" {
+            return None;
+        }
+    }
+    object.get("text")?.as_str()
+}
+
+fn set_chunk_text(value: &mut Value, text: String) {
+    if let Some(object) = value.as_object_mut() {
+        if let Some(slot) = object.get_mut("text") {
+            *slot = Value::String(text);
+        }
+    }
+}
+
 fn label_might_cover_the_value(key: &str, value: &str) -> bool {
     if value.len() < 8 {
         return false;

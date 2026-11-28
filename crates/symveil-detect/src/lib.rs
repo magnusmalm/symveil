@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod aws;
 pub mod dotenv;
 pub mod learned;
 mod learned_fast;

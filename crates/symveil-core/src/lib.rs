@@ -28,6 +28,7 @@ pub mod category;
 pub mod config;
 pub mod masker;
 pub mod names;
+pub mod paths;
 pub mod pii;
 pub mod proxy;
 pub mod redact;

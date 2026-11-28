@@ -222,6 +222,7 @@ fn assert_shape(value: &Value) {
     assert!(value["proxy"].get("timeout_secs").is_some());
     assert!(value["proxy"].get("high_entropy").is_some());
     assert!(value["proxy"].get("dotenv").is_some());
+    assert!(value["proxy"].get("home_paths").is_some());
 }
 
 #[test]
@@ -355,6 +356,7 @@ fn human_report_lists_the_effective_settings() {
         "enforce",
         "entropy",
         "dotenv",
+        "home_paths",
         "warnings",
         "none",
     ] {

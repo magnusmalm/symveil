@@ -176,6 +176,8 @@ pub fn redact_section(profile: &Profile) -> RedactSection {
         secrets,
         high_entropy: false,
         dotenv: true,
+        home_paths: true,
+        username: None,
         pii: crate::config::PiiSection::default(),
         names: NamesSection {
             terms,
@@ -334,6 +336,7 @@ audit_log = \".symveil/audit.jsonl\"
 [redact]
 high_entropy = false
 dotenv = true
+home_paths = true
 internal_domains = ["
     )?;
     for domain in &redact.internal_domains {

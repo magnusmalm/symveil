@@ -140,6 +140,7 @@ pub struct Report {
     mode: String,
     high_entropy: bool,
     dotenv: bool,
+    home_paths: bool,
     pub warnings: Vec<Warning>,
     sample: Option<SampleReport>,
     timings: Option<Timings>,
@@ -183,6 +184,7 @@ impl Report {
         push_line(&mut out, "mode", &self.mode);
         push_line(&mut out, "entropy", on(self.high_entropy));
         push_line(&mut out, "dotenv", on(self.dotenv));
+        push_line(&mut out, "home_paths", on(self.home_paths));
         push_warnings(&mut out, &self.warnings);
         if let Some(sample) = &self.sample {
             push_sample(&mut out, sample);
@@ -235,6 +237,7 @@ impl Report {
                 "mode": self.mode,
                 "high_entropy": self.high_entropy,
                 "dotenv": self.dotenv,
+                "home_paths": self.home_paths,
                 "openai_base": self.openai_base,
                 "anthropic_base": self.anthropic_base,
                 "vault": self.vault.path,
@@ -529,6 +532,7 @@ pub fn inspect(request: &Request) -> Result<Report> {
         mode: cfg.redact.mode.to_string(),
         high_entropy: cfg.redact.high_entropy,
         dotenv: cfg.redact.dotenv,
+        home_paths: cfg.redact.home_paths,
         warnings,
         sample,
         timings,

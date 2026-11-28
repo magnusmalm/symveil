@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 
+use symveil_detect::aws::{gap_hits, labeled_secret_hits};
 use symveil_detect::dotenv::dotenv_assignment_hits;
 use symveil_detect::secrets::{
     base64_hits, high_entropy_hits, split_literal_hits, SecretSet, UserRule,
@@ -92,6 +93,12 @@ impl Masker for SecretMasker {
             out.push(secret_candidate(hit));
         }
         for hit in split_literal_hits(&self.rules, text) {
+            out.push(secret_candidate(hit));
+        }
+        for hit in gap_hits(text) {
+            out.push(secret_candidate(hit));
+        }
+        for hit in labeled_secret_hits(text) {
             out.push(secret_candidate(hit));
         }
         if self.dotenv {
